@@ -1,0 +1,6 @@
+{
+  "name": "Sphere Social",
+  "description": "A lightweight social and rewards platform featuring a vertical short-form content feed, image posts, song tagging, creator economy wallet, and attention monetization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

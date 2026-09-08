@@ -1,0 +1,20 @@
+# Cloudflare Workers configuration for Sphere Social Serverless API
+name = "sphere-social-api"
+main = "worker.ts"
+compatibility_date = "2024-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Cloudflare D1 Database Binding
+[[d1_databases]]
+binding = "DB"
+database_name = "sphere-media"
+database_id = "0d401e4c-89da-4ae3-8401-f41f6c6b0238"
+
+# Cloudflare R2 Storage Bucket Binding (Images only)
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "sphere"
+
+[vars]
+ENVIRONMENT = "production"
+JWT_SECRET = "production_jwt_secret_configured_in_dashboard"
