@@ -20,6 +20,12 @@ export const FeedView: React.FC<FeedViewProps> = ({ onOpenCreate, onSelectCreato
   const [activeAudioUrl, setActiveAudioUrl] = useState<string | null>(null);
   const [isPlayingAudio, setIsPlayingAudio] = useState<boolean>(false);
   const [copiedPostId, setCopiedPostId] = useState<string | null>(null);
+  const [toastNotice, setToastNotice] = useState<string | null>(null);
+
+  const showToast = (msg: string) => {
+    setToastNotice(msg);
+    setTimeout(() => setToastNotice(null), 2500);
+  };
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const feedContainerRef = useRef<HTMLDivElement | null>(null);
@@ -46,7 +52,7 @@ export const FeedView: React.FC<FeedViewProps> = ({ onOpenCreate, onSelectCreato
   // Handle Like
   const handleLike = async (post: Post) => {
     if (!user) {
-      alert('Please log in to like posts.');
+      showToast('Please sign in to like posts.');
       return;
     }
 
@@ -78,7 +84,7 @@ export const FeedView: React.FC<FeedViewProps> = ({ onOpenCreate, onSelectCreato
   // Handle Follow
   const handleFollow = async (post: Post) => {
     if (!user) {
-      alert('Please log in to follow creators.');
+      showToast('Please sign in to follow creators.');
       return;
     }
     if (user.id === post.userId) return;
@@ -216,6 +222,11 @@ export const FeedView: React.FC<FeedViewProps> = ({ onOpenCreate, onSelectCreato
           {/* Top Brand Marker */}
           <div className="relative z-10 p-4 flex items-center justify-between text-xs">
             <span className="font-bold tracking-wider text-sm drop-shadow-md">Sphere</span>
+            {toastNotice && (
+              <div className="px-3 py-1 rounded-full bg-black/80 border border-zinc-700 text-white text-[11px] shadow-lg animate-fade-in">
+                {toastNotice}
+              </div>
+            )}
           </div>
 
           {/* Right Interaction Rail (Heart, Comment, Share) */}

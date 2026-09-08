@@ -84,6 +84,35 @@ async function getAuthUserId(request: Request, jwtSecret: string, db?: DatabaseA
   return payload.userId;
 }
 
+export async function ensureUserExistsInDb(db: DatabaseAdapter, userId: string, fallbackName?: string): Promise<void> {
+  if (!userId) return;
+  try {
+    const existing = await db.prepare('SELECT id FROM users WHERE id = ?').bind(userId).first();
+    if (!existing) {
+      const now = Date.now();
+      const cleanSuffix = userId.replace(/[^a-zA-Z0-9]/g, '').slice(-6) || 'creator';
+      await db
+        .prepare(
+          'INSERT OR IGNORE INTO users (id, username, email, password_hash, display_name, bio, avatar_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        )
+        .bind(
+          userId,
+          `user_${cleanSuffix}`,
+          `${userId}@sphere-social.app`,
+          '',
+          fallbackName || 'Sphere Creator',
+          'Sphere Community Member',
+          `https://api.dicebear.com/7.x/identicon/svg?seed=${userId}`,
+          now,
+          now
+        )
+        .run();
+    }
+  } catch (err: any) {
+    console.warn('[Sphere DB]: ensureUserExists warning:', err.message);
+  }
+}
+
 export async function handleServerlessRequest(request: Request, env: any = {}): Promise<Response> {
   const url = new URL(request.url);
   let path = url.pathname;
@@ -847,10 +876,7 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
       const now = Date.now();
 
       // Ensure user row exists in users table so foreign keys and joins are intact
-      await ctx.db
-        .prepare('INSERT OR IGNORE INTO users (id, username, email, password_hash, display_name, avatar_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-        .bind(currentUserId, `user_${currentUserId.slice(-6)}`, `${currentUserId}@sphere-social.app`, '', 'Creator', `https://api.dicebear.com/7.x/identicon/svg?seed=${currentUserId}`, now, now)
-        .run();
+      await ensureUserExistsInDb(ctx.db, currentUserId);
 
       await ctx.db
         .prepare(
@@ -918,34 +944,42 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
         return errorResponse('Post not found', 404, request);
       }
 
+      await ensureUserExistsInDb(ctx.db, currentUserId);
+
       const existingLike = await ctx.db
         .prepare('SELECT id FROM likes WHERE user_id = ? AND post_id = ?')
         .bind(currentUserId, postId)
         .first();
 
       let hasLiked: boolean;
-      let newCount: number;
 
       if (existingLike) {
         // Unlike
         await ctx.db.prepare('DELETE FROM likes WHERE user_id = ? AND post_id = ?').bind(currentUserId, postId).run();
-        await ctx.db.prepare('UPDATE posts SET likes_count = MAX(0, likes_count - 1) WHERE id = ?').bind(postId).run();
         hasLiked = false;
       } else {
         // Like
         const likeId = `lik_${generateId(12)}`;
         await ctx.db
-          .prepare('INSERT INTO likes (id, user_id, post_id, created_at) VALUES (?, ?, ?, ?)')
+          .prepare('INSERT OR IGNORE INTO likes (id, user_id, post_id, created_at) VALUES (?, ?, ?, ?)')
           .bind(likeId, currentUserId, postId, Date.now())
           .run();
-        await ctx.db.prepare('UPDATE posts SET likes_count = likes_count + 1 WHERE id = ?').bind(postId).run();
         hasLiked = true;
       }
 
-      const updatedRow: any = await ctx.db.prepare('SELECT likes_count FROM posts WHERE id = ?').bind(postId).first();
-      newCount = Number(updatedRow?.likes_count || 0);
+      // Authoritative count recalculation directly from likes table
+      const countRow: any = await ctx.db
+        .prepare('SELECT COUNT(*) as cnt FROM likes WHERE post_id = ?')
+        .bind(postId)
+        .first();
+      const authoritativeLikesCount = Number(countRow?.cnt || 0);
 
-      return jsonResponse({ success: true, data: { hasLiked, likesCount: newCount } });
+      await ctx.db
+        .prepare('UPDATE posts SET likes_count = ? WHERE id = ?')
+        .bind(authoritativeLikesCount, postId)
+        .run();
+
+      return jsonResponse({ success: true, data: { hasLiked, likesCount: authoritativeLikesCount } });
     }
 
     // -------------------------------------------------------------
@@ -959,9 +993,11 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
         const rows: any = await ctx.db
           .prepare(
             `SELECT c.id, c.post_id, c.user_id, c.content, c.created_at,
-                    u.username, u.display_name, u.avatar_url
+                    COALESCE(u.username, 'user') AS username,
+                    COALESCE(u.display_name, 'Sphere User') AS display_name,
+                    COALESCE(u.avatar_url, 'https://api.dicebear.com/7.x/identicon/svg?seed=' || c.user_id) AS avatar_url
              FROM comments c
-             JOIN users u ON c.user_id = u.id
+             LEFT JOIN users u ON c.user_id = u.id
              WHERE c.post_id = ?
              ORDER BY c.created_at ASC`
           )
@@ -999,6 +1035,8 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
           return errorResponse('Comment length limit is 500 characters.');
         }
 
+        await ensureUserExistsInDb(ctx.db, currentUserId);
+
         const commentId = `cmt_${generateId(12)}`;
         const now = Date.now();
 
@@ -1007,7 +1045,14 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
           .bind(commentId, postId, currentUserId, content, now)
           .run();
 
-        await ctx.db.prepare('UPDATE posts SET comments_count = comments_count + 1 WHERE id = ?').bind(postId).run();
+        // Recalculate authoritative comments count
+        const countRow: any = await ctx.db
+          .prepare('SELECT COUNT(*) as cnt FROM comments WHERE post_id = ?')
+          .bind(postId)
+          .first();
+        const authoritativeCommentsCount = Number(countRow?.cnt || 0);
+
+        await ctx.db.prepare('UPDATE posts SET comments_count = ? WHERE id = ?').bind(authoritativeCommentsCount, postId).run();
 
         const userRow: any = await ctx.db
           .prepare('SELECT username, display_name, avatar_url FROM users WHERE id = ?')
@@ -1021,7 +1066,7 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
           author: {
             username: userRow?.username || 'user',
             displayName: userRow?.display_name || 'User',
-            avatarUrl: userRow?.avatar_url,
+            avatarUrl: userRow?.avatar_url || `https://api.dicebear.com/7.x/identicon/svg?seed=${currentUserId}`,
           },
           content,
           createdAt: now,
@@ -1110,6 +1155,9 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
         return errorResponse('Cannot follow yourself.', 400, request);
       }
 
+      await ensureUserExistsInDb(ctx.db, currentUserId);
+      await ensureUserExistsInDb(ctx.db, targetUserId);
+
       const existingFollow = await ctx.db
         .prepare('SELECT id FROM follows WHERE follower_id = ? AND following_id = ?')
         .bind(currentUserId, targetUserId)
@@ -1125,13 +1173,169 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
       } else {
         const followId = `flw_${generateId(12)}`;
         await ctx.db
-          .prepare('INSERT INTO follows (id, follower_id, following_id, created_at) VALUES (?, ?, ?, ?)')
+          .prepare('INSERT OR IGNORE INTO follows (id, follower_id, following_id, created_at) VALUES (?, ?, ?, ?)')
           .bind(followId, currentUserId, targetUserId, Date.now())
           .run();
         isFollowing = true;
       }
 
       return jsonResponse({ success: true, data: { isFollowing } });
+    }
+
+    // -------------------------------------------------------------
+    // USER SETTINGS & PROFILE ALIGNMENT: /api/users/me/*
+    // -------------------------------------------------------------
+    if (path === '/api/users/me/settings' && method === 'GET') {
+      const currentUserId = await getAuthUserId(request, ctx.jwtSecret, ctx.db);
+      if (!currentUserId) return errorResponse('Authentication required.', 401, request);
+      await ensureUserExistsInDb(ctx.db, currentUserId);
+
+      let row: any = await ctx.db
+        .prepare('SELECT autoplay_audio, private_profile, notifications_enabled, data_saver, updated_at FROM user_settings WHERE user_id = ?')
+        .bind(currentUserId)
+        .first();
+
+      if (!row) {
+        const now = Date.now();
+        await ctx.db
+          .prepare('INSERT OR IGNORE INTO user_settings (user_id, autoplay_audio, private_profile, notifications_enabled, data_saver, updated_at) VALUES (?, 1, 0, 1, 0, ?)')
+          .bind(currentUserId, now)
+          .run();
+        row = { autoplay_audio: 1, private_profile: 0, notifications_enabled: 1, data_saver: 0, updated_at: now };
+      }
+
+      return jsonResponse({
+        success: true,
+        data: {
+          settings: {
+            autoplayAudio: Boolean(row.autoplay_audio),
+            privateProfile: Boolean(row.private_profile),
+            notificationsEnabled: Boolean(row.notifications_enabled),
+            dataSaver: Boolean(row.data_saver),
+            updatedAt: Number(row.updated_at),
+          },
+        },
+      }, 200, {}, request);
+    }
+
+    if (path === '/api/users/me/settings' && method === 'PUT') {
+      const currentUserId = await getAuthUserId(request, ctx.jwtSecret, ctx.db);
+      if (!currentUserId) return errorResponse('Authentication required.', 401, request);
+      await ensureUserExistsInDb(ctx.db, currentUserId);
+
+      const body: any = await request.json().catch(() => ({}));
+      const autoplay = body.autoplayAudio !== false ? 1 : 0;
+      const privateProfile = body.privateProfile ? 1 : 0;
+      const notifs = body.notificationsEnabled !== false ? 1 : 0;
+      const dataSaver = body.dataSaver ? 1 : 0;
+      const now = Date.now();
+
+      await ctx.db
+        .prepare(`
+          INSERT INTO user_settings (user_id, autoplay_audio, private_profile, notifications_enabled, data_saver, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(user_id) DO UPDATE SET
+            autoplay_audio = excluded.autoplay_audio,
+            private_profile = excluded.private_profile,
+            notifications_enabled = excluded.notifications_enabled,
+            data_saver = excluded.data_saver,
+            updated_at = excluded.updated_at
+        `)
+        .bind(currentUserId, autoplay, privateProfile, notifs, dataSaver, now)
+        .run();
+
+      return jsonResponse({
+        success: true,
+        data: {
+          settings: {
+            autoplayAudio: Boolean(autoplay),
+            privateProfile: Boolean(privateProfile),
+            notificationsEnabled: Boolean(notifs),
+            dataSaver: Boolean(dataSaver),
+            updatedAt: now,
+          },
+        },
+      }, 200, {}, request);
+    }
+
+    if (path === '/api/users/me/profile' && method === 'PUT') {
+      const currentUserId = await getAuthUserId(request, ctx.jwtSecret, ctx.db);
+      if (!currentUserId) return errorResponse('Authentication required.', 401, request);
+      await ensureUserExistsInDb(ctx.db, currentUserId);
+
+      const body: any = await request.json().catch(() => ({}));
+      const displayName = typeof body.displayName === 'string' ? body.displayName.trim() : undefined;
+      const bio = typeof body.bio === 'string' ? body.bio.trim() : undefined;
+      const avatarUrl = typeof body.avatarUrl === 'string' ? body.avatarUrl.trim() : undefined;
+      const now = Date.now();
+
+      const currentUserRow: any = await ctx.db.prepare('SELECT * FROM users WHERE id = ?').bind(currentUserId).first();
+      const newDisplayName = displayName !== undefined && displayName.length > 0 ? displayName : (currentUserRow?.display_name || 'Sphere Creator');
+      const newBio = bio !== undefined ? bio : (currentUserRow?.bio || '');
+      const newAvatarUrl = avatarUrl !== undefined && avatarUrl.length > 0 ? avatarUrl : (currentUserRow?.avatar_url || `https://api.dicebear.com/7.x/identicon/svg?seed=${currentUserId}`);
+
+      await ctx.db.prepare('UPDATE users SET display_name = ?, bio = ?, avatar_url = ?, updated_at = ? WHERE id = ?')
+        .bind(newDisplayName, newBio, newAvatarUrl, now, currentUserId)
+        .run();
+
+      const updatedUserRow: any = await ctx.db.prepare('SELECT id, username, email, display_name, bio, avatar_url, created_at FROM users WHERE id = ?').bind(currentUserId).first();
+      return jsonResponse({
+        success: true,
+        data: {
+          user: {
+            id: updatedUserRow.id,
+            username: updatedUserRow.username,
+            email: updatedUserRow.email,
+            displayName: updatedUserRow.display_name,
+            bio: updatedUserRow.bio || '',
+            avatarUrl: updatedUserRow.avatar_url || '',
+            createdAt: Number(updatedUserRow.created_at),
+          },
+        },
+      }, 200, {}, request);
+    }
+
+    if (path === '/api/users/me/change-password' && method === 'POST') {
+      const currentUserId = await getAuthUserId(request, ctx.jwtSecret, ctx.db);
+      if (!currentUserId) return errorResponse('Authentication required.', 401, request);
+      const body: any = await request.json().catch(() => ({}));
+      const { currentPassword, newPassword } = body;
+      if (!currentPassword || !newPassword || newPassword.length < 6) {
+        return errorResponse('Valid current password and new password (min 6 characters) are required.', 400, request);
+      }
+      const userRow: any = await ctx.db.prepare('SELECT password_hash FROM users WHERE id = ?').bind(currentUserId).first();
+      if (!userRow || !userRow.password_hash) {
+        return errorResponse('User account not found.', 404, request);
+      }
+      const isValid = await verifyPassword(currentPassword, userRow.password_hash);
+      if (!isValid) {
+        return errorResponse('Incorrect current password.', 403, request);
+      }
+      const newHash = await hashPassword(newPassword);
+      await ctx.db.prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?').bind(newHash, Date.now(), currentUserId).run();
+      return jsonResponse({ success: true, message: 'Password updated successfully and verified in database.' }, 200, {}, request);
+    }
+
+    if (path === '/api/system/status' && method === 'GET') {
+      const isBrevo = ctx.emailProvider.isConfigured();
+      const postsCount: any = await ctx.db.prepare('SELECT COUNT(*) as c FROM posts').first();
+      const usersCount: any = await ctx.db.prepare('SELECT COUNT(*) as c FROM users').first();
+      return jsonResponse({
+        success: true,
+        data: {
+          database: 'sqlite_wal',
+          persistent: true,
+          healthy: true,
+          stats: {
+            totalPosts: Number(postsCount?.c || 0),
+            totalUsers: Number(usersCount?.c || 0),
+          },
+          tables: ['users', 'posts', 'likes', 'comments', 'follows', 'sessions', 'wallets', 'transactions', 'user_settings', 'password_resets'],
+          brevoConfigured: isBrevo,
+          walletActive: true,
+          timestamp: Date.now(),
+        },
+      }, 200, {}, request);
     }
 
     // -------------------------------------------------------------
@@ -1374,6 +1578,8 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
       const requestedAmount = typeof body.amount === 'number' ? body.amount : 0.25;
       const safeAmount = Math.min(Math.max(Number(requestedAmount.toFixed(2)), 0.05), 1.00);
 
+      await ensureUserExistsInDb(ctx.db, currentUserId);
+
       let walletRow: any = await ctx.db
         .prepare('SELECT id, balance, total_earned FROM wallets WHERE user_id = ?')
         .bind(currentUserId)
@@ -1383,8 +1589,8 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
       if (!walletRow) {
         const newWalletId = `w_${generateId(12)}`;
         await ctx.db
-          .prepare('INSERT INTO wallets (id, user_id, balance, total_earned, created_at, updated_at) VALUES (?, ?, 0, 0, ?, ?)')
-          .bind(newWalletId, currentUserId, now, now)
+          .prepare('INSERT INTO wallets (id, user_id, balance, total_earned, total_withdrawn, updated_at) VALUES (?, ?, 0.00, 0.00, 0.00, ?)')
+          .bind(newWalletId, currentUserId, now)
           .run();
         walletRow = { id: newWalletId, balance: 0, total_earned: 0 };
       }

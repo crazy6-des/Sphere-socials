@@ -131,6 +131,17 @@ CREATE TABLE IF NOT EXISTS password_resets (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+-- User Settings table for persistent user preferences and alignment
+CREATE TABLE IF NOT EXISTS user_settings (
+  user_id TEXT PRIMARY KEY,
+  autoplay_audio INTEGER DEFAULT 1,
+  private_profile INTEGER DEFAULT 0,
+  notifications_enabled INTEGER DEFAULT 1,
+  data_saver INTEGER DEFAULT 0,
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
 -- Query optimization indexes
 CREATE INDEX IF NOT EXISTS idx_posts_user ON posts(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC);

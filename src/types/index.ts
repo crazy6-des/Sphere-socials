@@ -117,3 +117,22 @@ export interface ApiResponse<T = any> {
   error?: string;
   message?: string;
 }
+
+export interface UserSettings {
+  autoplayAudio: boolean;
+  privateProfile: boolean;
+  notificationsEnabled: boolean;
+  dataSaver: boolean;
+  updatedAt?: number;
+}
+
+export interface SystemStatus {
+  database: string;
+  persistent: boolean;
+  healthy: boolean;
+  tables: string[];
+  brevoConfigured: boolean;
+  walletActive: boolean;
+  timestamp: number;
+}
+

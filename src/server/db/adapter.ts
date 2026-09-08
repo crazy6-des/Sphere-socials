@@ -98,13 +98,14 @@ export class CloudflareD1HttpAdapter implements DatabaseAdapter {
   }
 
   private async executeQuery(sql: string, params: any[]): Promise<any> {
+    const sanitizedParams = params.map(sanitizeSqliteValue);
     const res = await fetch(this.endpoint, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${this.apiToken}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ sql, params }),
+      body: JSON.stringify({ sql, params: sanitizedParams }),
     });
 
     if (!res.ok) {
@@ -137,6 +138,12 @@ try {
   // node:sqlite not present or in unsupported runtime
 }
 
+function sanitizeSqliteValue(val: any): any {
+  if (val === undefined) return null;
+  if (typeof val === 'boolean') return val ? 1 : 0;
+  return val;
+}
+
 function isServerlessEnvironment(): boolean {
   if (typeof process === 'undefined') return true;
   const env = process.env || {};
@@ -146,16 +153,8 @@ function isServerlessEnvironment(): boolean {
     env.NETLIFY ||
     env.NETLIFY_LOCAL ||
     env.AWS_LAMBDA_FUNCTION_NAME ||
-    env.AWS_REGION ||
-    env.AWS_EXECUTION_ENV ||
     env.LAMBDA_TASK_ROOT ||
-    env.VERCEL ||
-    env.VERCEL_ENV ||
-    cwd.startsWith('/var/task') ||
-    cwd.startsWith('/var') ||
-    cwd.includes('netlify') ||
-    cwd.includes('vercel') ||
-    (fs.existsSync('/tmp') && !fs.existsSync('./data'))
+    cwd.startsWith('/var/task')
   );
 }
 
@@ -171,11 +170,23 @@ export class NodeSqliteAdapter implements DatabaseAdapter {
         return;
       }
 
-      const isServerless = isServerlessEnvironment();
-
-      // In serverless (Netlify, AWS Lambda), current working directory is read-only.
-      // /tmp is the only writable directory.
-      const targetPath = dbPath || (isServerless ? '/tmp/sphere.db' : './data/sphere.db');
+      let targetPath = dbPath;
+      if (!targetPath) {
+        const isServerless = isServerlessEnvironment();
+        if (isServerless) {
+          targetPath = '/tmp/sphere.db';
+        } else {
+          const dataDir = path.resolve(process.cwd(), 'data');
+          if (!fs.existsSync(dataDir)) {
+            try {
+              fs.mkdirSync(dataDir, { recursive: true });
+            } catch {
+              // ignore
+            }
+          }
+          targetPath = path.join(dataDir, 'sphere.db');
+        }
+      }
 
       try {
         const dir = path.dirname(targetPath);
@@ -227,7 +238,8 @@ export class NodeSqliteAdapter implements DatabaseAdapter {
         if (!db) return { results: [], success: true };
         try {
           const statement = db.prepare(sql);
-          const results = statement.all(...boundValues) as T[];
+          const sanitized = boundValues.map(sanitizeSqliteValue);
+          const results = statement.all(...sanitized) as T[];
           return { results, success: true };
         } catch (error: any) {
           console.error('[SQL Error in all()]:', error.message, 'SQL:', sql);
@@ -238,7 +250,8 @@ export class NodeSqliteAdapter implements DatabaseAdapter {
         if (!db) return null;
         try {
           const statement = db.prepare(sql);
-          const row = statement.get(...boundValues) as any;
+          const sanitized = boundValues.map(sanitizeSqliteValue);
+          const row = statement.get(...sanitized) as any;
           if (!row) return null;
           if (colName) return row[colName] ?? null;
           return row as T;
@@ -251,7 +264,8 @@ export class NodeSqliteAdapter implements DatabaseAdapter {
         if (!db) return { success: true, meta: { changes: 0, last_row_id: 0 } };
         try {
           const statement = db.prepare(sql);
-          const result = statement.run(...boundValues);
+          const sanitized = boundValues.map(sanitizeSqliteValue);
+          const result = statement.run(...sanitized);
           return {
             success: true,
             meta: {

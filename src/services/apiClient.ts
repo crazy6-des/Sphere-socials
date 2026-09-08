@@ -1,4 +1,4 @@
-import { ApiResponse, AuthResponse, User, Post, Comment, UserPublicProfile, Wallet, Transaction, Withdrawal, RewardProviderStatus, SongMetadata } from '../types';
+import { ApiResponse, AuthResponse, User, Post, Comment, UserPublicProfile, Wallet, Transaction, Withdrawal, RewardProviderStatus, SongMetadata, UserSettings, SystemStatus } from '../types';
 
 const API_BASE_URL = (import.meta as any).env?.VITE_API_BASE_URL || '';
 const TOKEN_STORAGE_KEY = 'sphere_auth_token';
@@ -342,9 +342,22 @@ class ApiClient {
   }
 
   async toggleLike(postId: string): Promise<{ hasLiked: boolean; likesCount: number }> {
-    return this.request<{ hasLiked: boolean; likesCount: number }>(`/api/posts/${postId}/like`, {
+    const res = await this.request<{ hasLiked: boolean; likesCount: number }>(`/api/posts/${postId}/like`, {
       method: 'POST',
     });
+
+    if (res) {
+      // Update local storage cache so it persists instantly
+      try {
+        const cached = this.getCachedFeed();
+        const updated = cached.map(p => p.id === postId ? { ...p, hasLiked: res.hasLiked, likesCount: res.likesCount } : p);
+        localStorage.setItem(FEED_CACHE_KEY, JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
+    }
+
+    return res;
   }
 
   async getComments(postId: string): Promise<{ comments: Comment[] }> {
@@ -352,15 +365,53 @@ class ApiClient {
   }
 
   async addComment(postId: string, content: string): Promise<{ comment: Comment }> {
-    return this.request<{ comment: Comment }>(`/api/posts/${postId}/comments`, {
+    const res = await this.request<{ comment: Comment }>(`/api/posts/${postId}/comments`, {
       method: 'POST',
       body: JSON.stringify({ content }),
     });
+
+    if (res?.comment) {
+      try {
+        const cached = this.getCachedFeed();
+        const updated = cached.map(p => p.id === postId ? { ...p, commentsCount: p.commentsCount + 1 } : p);
+        localStorage.setItem(FEED_CACHE_KEY, JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
+    }
+
+    return res;
   }
 
   // Profile & Social
   async getUserProfile(username: string): Promise<{ profile: UserPublicProfile }> {
     return this.request<{ profile: UserPublicProfile }>(`/api/users/${username}`, { method: 'GET' });
+  }
+
+  async updateProfile(data: { displayName?: string; bio?: string; avatarUrl?: string }): Promise<{ user: User }> {
+    const res = await this.request<{ user: User }>('/api/users/me/profile', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+    if (res?.user) {
+      localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(res.user));
+    }
+    return res;
+  }
+
+  async getUserSettings(): Promise<{ settings: UserSettings }> {
+    return this.request<{ settings: UserSettings }>('/api/users/me/settings', { method: 'GET' });
+  }
+
+  async updateUserSettings(settings: Partial<UserSettings>): Promise<{ settings: UserSettings }> {
+    return this.request<{ settings: UserSettings }>('/api/users/me/settings', {
+      method: 'PUT',
+      body: JSON.stringify(settings),
+    });
+  }
+
+  async getSystemStatus(): Promise<{ success: boolean; data: SystemStatus }> {
+    return this.request<{ success: boolean; data: SystemStatus }>('/api/system/status', { method: 'GET' });
   }
 
   async toggleFollow(userId: string): Promise<{ isFollowing: boolean }> {
