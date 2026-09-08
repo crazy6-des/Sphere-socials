@@ -17,8 +17,14 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<User | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [user, setUser] = useState<User | null>(() => apiClient.getCachedUser());
+  const [isLoading, setIsLoading] = useState<boolean>(() => {
+    // If no token exists, we are not loading
+    if (!apiClient.getToken()) return false;
+    // If we have a cached user, we can render immediately without blocking
+    if (apiClient.getCachedUser()) return false;
+    return true;
+  });
 
   const refreshUser = useCallback(async () => {
     const token = apiClient.getToken();
@@ -29,11 +35,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     try {
       const res = await apiClient.getMe();
-      setUser(res.user);
-    } catch (err) {
-      console.warn('[Auth] Token invalid or expired, resetting session.');
-      apiClient.setToken(null);
-      setUser(null);
+      if (res?.user) {
+        setUser(res.user);
+      }
+    } catch (err: any) {
+      const errMsg = err?.message || '';
+      // ONLY clear session if the server cryptographically rejected the token
+      if (errMsg.includes('401') || errMsg.includes('Invalid or expired') || errMsg.includes('Unauthorized')) {
+        console.warn('[Auth] Session definitively revoked or expired:', errMsg);
+        apiClient.setSession(null, null, null);
+        setUser(null);
+      } else {
+        console.warn('[Auth] Temporary network or server latency; preserving cached user session:', errMsg);
+        // Retain cached user so UI never flickers or logs out on refresh
+        const cached = apiClient.getCachedUser();
+        if (cached) {
+          setUser(cached);
+        }
+      }
     } finally {
       setIsLoading(false);
     }

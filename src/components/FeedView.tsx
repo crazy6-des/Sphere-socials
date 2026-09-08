@@ -12,8 +12,8 @@ interface FeedViewProps {
 
 export const FeedView: React.FC<FeedViewProps> = ({ onOpenCreate, onSelectCreator }) => {
   const { user } = useAuth();
-  const [posts, setPosts] = useState<Post[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [posts, setPosts] = useState<Post[]>(() => apiClient.getCachedFeed());
+  const [loading, setLoading] = useState<boolean>(() => apiClient.getCachedFeed().length === 0);
   const [page, setPage] = useState<number>(1);
   const [hasMore, setHasMore] = useState<boolean>(true);
   const [activeCommentsPostId, setActiveCommentsPostId] = useState<string | null>(null);
@@ -26,7 +26,7 @@ export const FeedView: React.FC<FeedViewProps> = ({ onOpenCreate, onSelectCreato
 
   // Load feed posts
   const fetchPosts = async (pageNum: number, refresh = false) => {
-    if (pageNum === 1) setLoading(true);
+    if (pageNum === 1 && posts.length === 0) setLoading(true);
     try {
       const res = await apiClient.getPosts(pageNum, 8);
       setPosts((prev) => (refresh || pageNum === 1 ? res.posts : [...prev, ...res.posts]));

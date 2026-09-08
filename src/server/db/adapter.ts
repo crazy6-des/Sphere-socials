@@ -38,6 +38,89 @@ export class D1DatabaseAdapter implements DatabaseAdapter {
   }
 }
 
+/**
+ * Cloudflare D1 Direct HTTP REST API Adapter
+ * Connects directly to Cloudflare D1 across the globe using the Cloudflare v4 REST API
+ */
+export class CloudflareD1HttpAdapter implements DatabaseAdapter {
+  private endpoint: string;
+  private apiToken: string;
+
+  constructor(accountId: string, databaseId: string, apiToken: string) {
+    this.endpoint = `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database/${databaseId}/query`;
+    this.apiToken = apiToken;
+  }
+
+  prepare(sql: string): D1PreparedStatement {
+    let boundParams: any[] = [];
+    const self = this;
+
+    const stmt: D1PreparedStatement = {
+      bind(...values: any[]): D1PreparedStatement {
+        boundParams = values;
+        return stmt;
+      },
+      async all<T = any>(): Promise<{ results: T[]; success: boolean }> {
+        const data = await self.executeQuery(sql, boundParams);
+        return { results: (data.results || []) as T[], success: true };
+      },
+      async first<T = any>(colName?: string): Promise<T | null> {
+        const data = await self.executeQuery(sql, boundParams);
+        const rows = data.results || [];
+        if (rows.length === 0) return null;
+        if (colName) return rows[0][colName] ?? null;
+        return rows[0] as T;
+      },
+      async run(): Promise<{ success: boolean; meta: { changes: number; last_row_id: number } }> {
+        const data = await self.executeQuery(sql, boundParams);
+        return {
+          success: true,
+          meta: {
+            changes: data.meta?.changes ?? 0,
+            last_row_id: data.meta?.last_row_id ?? 0,
+          },
+        };
+      },
+    };
+
+    return stmt;
+  }
+
+  async exec(sql: string): Promise<void> {
+    const statements = sql
+      .split(';')
+      .map(s => s.trim())
+      .filter(s => s.length > 0);
+
+    for (const statement of statements) {
+      await this.executeQuery(statement, []);
+    }
+  }
+
+  private async executeQuery(sql: string, params: any[]): Promise<any> {
+    const res = await fetch(this.endpoint, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.apiToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ sql, params }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`D1 HTTP query failed (${res.status}): ${errText}`);
+    }
+
+    const json: any = await res.json();
+    if (!json.success && json.errors?.length) {
+      throw new Error(`D1 query error: ${json.errors[0]?.message || 'Unknown error'}`);
+    }
+
+    return json.result?.[0] || { results: [], meta: {} };
+  }
+}
+
 // Dynamically obtain DatabaseSync if available in Node 22+ without static imports
 let DatabaseSyncClass: any = null;
 try {
@@ -295,6 +378,28 @@ let sharedAdapterInstance: DatabaseAdapter | null = null;
 export function getDatabaseAdapter(env?: any): DatabaseAdapter {
   if (env && env.DB) {
     return new D1DatabaseAdapter(env.DB);
+  }
+
+  // Check for Cloudflare D1 Direct HTTP configuration
+  const cfToken =
+    (typeof process !== 'undefined' && (process.env.CLOUDFLARE_API_TOKEN || process.env.CLOUDFLARE_D1_TOKEN)) ||
+    env?.CLOUDFLARE_API_TOKEN ||
+    env?.CLOUDFLARE_D1_TOKEN;
+  const cfAccount =
+    (typeof process !== 'undefined' && process.env.CLOUDFLARE_ACCOUNT_ID) ||
+    env?.CLOUDFLARE_ACCOUNT_ID ||
+    '6fe0a69a604d3b4214eee512955eb35e';
+  const cfDbId =
+    (typeof process !== 'undefined' && process.env.CLOUDFLARE_D1_DATABASE_ID) ||
+    env?.CLOUDFLARE_D1_DATABASE_ID ||
+    '0d401e4c-89da-4ae3-8401-f41f6c6b0238';
+
+  if (cfToken && cfAccount && cfDbId) {
+    if (!sharedAdapterInstance || !(sharedAdapterInstance instanceof CloudflareD1HttpAdapter)) {
+      console.info('[Sphere DB]: Connecting directly to Cloudflare D1 via global HTTP API');
+      sharedAdapterInstance = new CloudflareD1HttpAdapter(cfAccount, cfDbId, cfToken);
+    }
+    return sharedAdapterInstance;
   }
 
   if (sharedAdapterInstance) {

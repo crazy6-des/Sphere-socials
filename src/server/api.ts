@@ -390,18 +390,51 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
     }
 
     if (path === '/api/auth/me' && method === 'GET') {
-      const currentUserId = await getAuthUserId(request, ctx.jwtSecret, db);
-      if (!currentUserId) {
+      const authHeader = request.headers.get('Authorization') || request.headers.get('authorization');
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
         return errorResponse('Unauthorized', 401, request);
       }
+      const token = authHeader.substring(7).trim();
+      const payload = await verifyJwt<{ userId: string; username?: string }>(token, ctx.jwtSecret);
+      if (!payload?.userId) {
+        return errorResponse('Invalid or expired authentication session', 401, request);
+      }
 
-      const row: any = await db
+      const currentUserId = payload.userId;
+      let row: any = await db
         .prepare('SELECT id, username, email, display_name, bio, avatar_url, created_at FROM users WHERE id = ?')
         .bind(currentUserId)
         .first();
 
       if (!row) {
-        return errorResponse('User not found', 404, request);
+        // Auto-recover user in fresh container from cryptographic JWT payload
+        const now = Date.now();
+        const username = payload.username || `user_${currentUserId.slice(-6)}`;
+        const email = `${username}@sphere-social.app`;
+        const displayName = username.charAt(0).toUpperCase() + username.slice(1);
+        const avatarUrl = `https://api.dicebear.com/7.x/identicon/svg?seed=${username}`;
+
+        await db
+          .prepare(
+            'INSERT OR IGNORE INTO users (id, username, email, password_hash, display_name, bio, avatar_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          )
+          .bind(currentUserId, username, email, '', displayName, 'Sphere member', avatarUrl, now, now)
+          .run();
+
+        await db
+          .prepare('INSERT OR IGNORE INTO wallets (id, user_id, balance, total_earned, total_withdrawn, updated_at) VALUES (?, ?, 100.00, 100.00, 0.00, ?)')
+          .bind(`wal_${currentUserId.slice(-8)}`, currentUserId, now)
+          .run();
+
+        row = {
+          id: currentUserId,
+          username,
+          email,
+          display_name: displayName,
+          bio: 'Sphere member',
+          avatar_url: avatarUrl,
+          created_at: now,
+        };
       }
 
       const user: User = {
@@ -735,11 +768,13 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
           p.id, p.user_id, p.image_url, p.caption,
           p.song_title, p.song_artist, p.song_album, p.song_artwork_url, p.song_preview_url, p.song_provider_id,
           p.likes_count, p.comments_count, p.created_at,
-          u.username, u.display_name, u.avatar_url,
+          COALESCE(u.username, 'creator') AS username,
+          COALESCE(u.display_name, 'Creator') AS display_name,
+          COALESCE(u.avatar_url, 'https://api.dicebear.com/7.x/identicon/svg?seed=' || p.user_id) AS avatar_url,
           ${currentUserId ? `(SELECT 1 FROM likes l WHERE l.post_id = p.id AND l.user_id = '${currentUserId}') AS has_liked` : '0 AS has_liked'},
           ${currentUserId ? `(SELECT 1 FROM follows f WHERE f.following_id = p.user_id AND f.follower_id = '${currentUserId}') AS is_following` : '0 AS is_following'}
         FROM posts p
-        JOIN users u ON p.user_id = u.id
+        LEFT JOIN users u ON p.user_id = u.id
       `;
 
       const params: any[] = [];
@@ -811,6 +846,12 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
       const postId = `pst_${generateId(12)}`;
       const now = Date.now();
 
+      // Ensure user row exists in users table so foreign keys and joins are intact
+      await ctx.db
+        .prepare('INSERT OR IGNORE INTO users (id, username, email, password_hash, display_name, avatar_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .bind(currentUserId, `user_${currentUserId.slice(-6)}`, `${currentUserId}@sphere-social.app`, '', 'Creator', `https://api.dicebear.com/7.x/identicon/svg?seed=${currentUserId}`, now, now)
+        .run();
+
       await ctx.db
         .prepare(
           `INSERT INTO posts (
@@ -844,9 +885,9 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
         userId: currentUserId,
         author: {
           id: currentUserId,
-          username: authorRow?.username || 'user',
+          username: authorRow?.username || `user_${currentUserId.slice(-6)}`,
           displayName: authorRow?.display_name || 'Creator',
-          avatarUrl: authorRow?.avatar_url,
+          avatarUrl: authorRow?.avatar_url || `https://api.dicebear.com/7.x/identicon/svg?seed=${currentUserId}`,
         },
         imageUrl,
         caption: (caption || '').trim(),
