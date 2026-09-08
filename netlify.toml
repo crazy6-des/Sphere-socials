@@ -3,9 +3,19 @@
   publish = "dist"
   command = "npm run build"
 
+[build.environment]
+  NODE_VERSION = "22"
+  AWS_LAMBDA_JS_RUNTIME = "nodejs22.x"
+
 [functions]
   directory = "netlify/functions"
   node_bundler = "esbuild"
+
+# Explicit redirect rewrite for Netlify Functions v1/v2 compatibility
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
 
 # Single-Page Application (SPA) fallback
 [[redirects]]

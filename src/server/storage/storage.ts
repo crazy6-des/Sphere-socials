@@ -221,50 +221,86 @@ export class CloudflareR2StorageProvider implements StorageProvider {
  */
 export class PersistentDiskStorageProvider implements StorageProvider {
   private uploadsDir: string;
+  private memoryFallback: Map<string, { data: Uint8Array | Buffer; contentType: string }> = new Map();
 
-  constructor(uploadsDir: string = './data/uploads') {
-    this.uploadsDir = uploadsDir;
-    if (!fs.existsSync(this.uploadsDir)) {
-      fs.mkdirSync(this.uploadsDir, { recursive: true });
+  constructor(uploadsDir?: string) {
+    const isServerless = Boolean(
+      (typeof process !== 'undefined' && (
+        process.env.NETLIFY ||
+        process.env.AWS_LAMBDA_FUNCTION_NAME ||
+        process.env.LAMBDA_TASK_ROOT ||
+        process.env.VERCEL ||
+        (typeof process.cwd === 'function' && process.cwd().includes('/var/task')) ||
+        (fs.existsSync('/tmp') && !fs.existsSync('./data'))
+      ))
+    );
+
+    this.uploadsDir = uploadsDir || (isServerless ? '/tmp/uploads' : './data/uploads');
+    try {
+      if (!fs.existsSync(this.uploadsDir)) {
+        fs.mkdirSync(this.uploadsDir, { recursive: true });
+      }
+    } catch (err: any) {
+      console.warn('[Sphere Storage Notice]: Could not create uploads directory, using memory fallback:', err.message);
     }
   }
 
   async put(key: string, data: Uint8Array | Buffer, contentType: string): Promise<{ key: string; url: string }> {
-    const filePath = path.join(this.uploadsDir, key);
-    const metaPath = path.join(this.uploadsDir, `${key}.meta`);
+    try {
+      const filePath = path.join(this.uploadsDir, key);
+      const metaPath = path.join(this.uploadsDir, `${key}.meta`);
 
-    fs.writeFileSync(filePath, data);
-    fs.writeFileSync(metaPath, JSON.stringify({ contentType, createdAt: Date.now() }));
+      fs.writeFileSync(filePath, data);
+      fs.writeFileSync(metaPath, JSON.stringify({ contentType, createdAt: Date.now() }));
+    } catch {
+      // Fallback to in-memory map
+      this.memoryFallback.set(key, { data, contentType });
+    }
 
     const url = this.getPublicUrl(key);
     return { key, url };
   }
 
   async get(key: string): Promise<{ data: Uint8Array | Buffer; contentType: string } | null> {
-    const filePath = path.join(this.uploadsDir, key);
-    const metaPath = path.join(this.uploadsDir, `${key}.meta`);
+    try {
+      const filePath = path.join(this.uploadsDir, key);
+      const metaPath = path.join(this.uploadsDir, `${key}.meta`);
 
-    if (!fs.existsSync(filePath)) return null;
-
-    const buffer = fs.readFileSync(filePath);
-    let contentType = 'image/jpeg';
-    if (fs.existsSync(metaPath)) {
-      try {
-        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-        contentType = meta.contentType || contentType;
-      } catch {
-        // ignore
+      if (fs.existsSync(filePath)) {
+        const buffer = fs.readFileSync(filePath);
+        let contentType = 'image/jpeg';
+        if (fs.existsSync(metaPath)) {
+          try {
+            const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+            contentType = meta.contentType || contentType;
+          } catch {
+            // ignore
+          }
+        }
+        return { data: buffer, contentType };
       }
+    } catch {
+      // fallback to memory
     }
 
-    return { data: buffer, contentType };
+    const inMemory = this.memoryFallback.get(key);
+    if (inMemory) {
+      return inMemory;
+    }
+
+    return null;
   }
 
   async delete(key: string): Promise<void> {
-    const filePath = path.join(this.uploadsDir, key);
-    const metaPath = path.join(this.uploadsDir, `${key}.meta`);
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-    if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
+    try {
+      const filePath = path.join(this.uploadsDir, key);
+      const metaPath = path.join(this.uploadsDir, `${key}.meta`);
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
+    } catch {
+      // ignore
+    }
+    this.memoryFallback.delete(key);
   }
 
   getPublicUrl(key: string): string {
@@ -292,5 +328,5 @@ export function getStorageProvider(env?: any): StorageProvider {
   }
 
   // 3. Persistent disk storage fallback
-  return new PersistentDiskStorageProvider('./data/uploads');
+  return new PersistentDiskStorageProvider();
 }
