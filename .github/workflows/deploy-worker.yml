@@ -23,4 +23,5 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: 6fe0a69a604d3b4214eee512955eb35e
+          packageManager: npm
           command: deploy
