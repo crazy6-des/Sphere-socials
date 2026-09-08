@@ -1,7 +1,7 @@
 # Cloudflare Workers configuration for Sphere Social Serverless API
 name = "sphere-social-api"
 main = "worker.ts"
-compatibility_date = "2024-09-01"
+compatibility_date = "2026-09-08"
 compatibility_flags = ["nodejs_compat"]
 
 # Cloudflare D1 Database Binding
