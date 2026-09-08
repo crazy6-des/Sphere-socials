@@ -15,13 +15,24 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-
       - name: Deploy Worker
+        id: deploy
         uses: cloudflare/wrangler-action@v4
+        continue-on-error: true
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: 6fe0a69a604d3b4214eee512955eb35e
           packageManager: npm
           command: deploy
+
+      - name: Show Wrangler error
+        if: always()
+        run: |
+          echo "===== WRANGLER STDOUT ====="
+          echo '${{ steps.deploy.outputs.command-output }}'
+          echo "===== WRANGLER STDERR ====="
+          echo '${{ steps.deploy.outputs.command-stderr }}'
+
+      - name: Fail if deployment failed
+        if: steps.deploy.outcome == 'failure'
+        run: exit 1
