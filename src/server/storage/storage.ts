@@ -3,8 +3,21 @@
  * Designed around Cloudflare R2 with image-only enforcement.
  * Never stores media inside frontend code, git, Netlify bundles, or D1 blobs.
  */
-import fs from 'node:fs';
-import path from 'node:path';
+
+function getNodeBuiltin(name: string): any {
+  if (typeof process === 'undefined') return null;
+  try {
+    if (typeof (process as any).getBuiltinModule === 'function') {
+      return (process as any).getBuiltinModule(name);
+    }
+    if (typeof (globalThis as any).require === 'function') {
+      return (globalThis as any).require(name);
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
 
 export interface StorageProvider {
   put(key: string, data: Uint8Array | Buffer, contentType: string): Promise<{ key: string; url: string }>;
@@ -224,6 +237,7 @@ export class PersistentDiskStorageProvider implements StorageProvider {
   private memoryFallback: Map<string, { data: Uint8Array | Buffer; contentType: string }> = new Map();
 
   constructor(uploadsDir?: string) {
+    const fs = getNodeBuiltin('node:fs') || getNodeBuiltin('fs');
     const isServerless = Boolean(
       (typeof process !== 'undefined' && (
         process.env.NETLIFY ||
@@ -231,13 +245,13 @@ export class PersistentDiskStorageProvider implements StorageProvider {
         process.env.LAMBDA_TASK_ROOT ||
         process.env.VERCEL ||
         (typeof process.cwd === 'function' && process.cwd().includes('/var/task')) ||
-        (fs.existsSync('/tmp') && !fs.existsSync('./data'))
+        (fs && fs.existsSync('/tmp') && !fs.existsSync('./data'))
       ))
     );
 
     this.uploadsDir = uploadsDir || (isServerless ? '/tmp/uploads' : './data/uploads');
     try {
-      if (!fs.existsSync(this.uploadsDir)) {
+      if (fs && !fs.existsSync(this.uploadsDir)) {
         fs.mkdirSync(this.uploadsDir, { recursive: true });
       }
     } catch (err: any) {
@@ -247,11 +261,17 @@ export class PersistentDiskStorageProvider implements StorageProvider {
 
   async put(key: string, data: Uint8Array | Buffer, contentType: string): Promise<{ key: string; url: string }> {
     try {
-      const filePath = path.join(this.uploadsDir, key);
-      const metaPath = path.join(this.uploadsDir, `${key}.meta`);
+      const fs = getNodeBuiltin('node:fs') || getNodeBuiltin('fs');
+      const path = getNodeBuiltin('node:path') || getNodeBuiltin('path');
+      if (fs && path) {
+        const filePath = path.join(this.uploadsDir, key);
+        const metaPath = path.join(this.uploadsDir, `${key}.meta`);
 
-      fs.writeFileSync(filePath, data);
-      fs.writeFileSync(metaPath, JSON.stringify({ contentType, createdAt: Date.now() }));
+        fs.writeFileSync(filePath, data);
+        fs.writeFileSync(metaPath, JSON.stringify({ contentType, createdAt: Date.now() }));
+      } else {
+        this.memoryFallback.set(key, { data, contentType });
+      }
     } catch {
       // Fallback to in-memory map
       this.memoryFallback.set(key, { data, contentType });
@@ -263,21 +283,25 @@ export class PersistentDiskStorageProvider implements StorageProvider {
 
   async get(key: string): Promise<{ data: Uint8Array | Buffer; contentType: string } | null> {
     try {
-      const filePath = path.join(this.uploadsDir, key);
-      const metaPath = path.join(this.uploadsDir, `${key}.meta`);
+      const fs = getNodeBuiltin('node:fs') || getNodeBuiltin('fs');
+      const path = getNodeBuiltin('node:path') || getNodeBuiltin('path');
+      if (fs && path) {
+        const filePath = path.join(this.uploadsDir, key);
+        const metaPath = path.join(this.uploadsDir, `${key}.meta`);
 
-      if (fs.existsSync(filePath)) {
-        const buffer = fs.readFileSync(filePath);
-        let contentType = 'image/jpeg';
-        if (fs.existsSync(metaPath)) {
-          try {
-            const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-            contentType = meta.contentType || contentType;
-          } catch {
-            // ignore
+        if (fs.existsSync(filePath)) {
+          const buffer = fs.readFileSync(filePath);
+          let contentType = 'image/jpeg';
+          if (fs.existsSync(metaPath)) {
+            try {
+              const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+              contentType = meta.contentType || contentType;
+            } catch {
+              // ignore
+            }
           }
+          return { data: buffer, contentType };
         }
-        return { data: buffer, contentType };
       }
     } catch {
       // fallback to memory
@@ -293,10 +317,14 @@ export class PersistentDiskStorageProvider implements StorageProvider {
 
   async delete(key: string): Promise<void> {
     try {
-      const filePath = path.join(this.uploadsDir, key);
-      const metaPath = path.join(this.uploadsDir, `${key}.meta`);
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-      if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
+      const fs = getNodeBuiltin('node:fs') || getNodeBuiltin('fs');
+      const path = getNodeBuiltin('node:path') || getNodeBuiltin('path');
+      if (fs && path) {
+        const filePath = path.join(this.uploadsDir, key);
+        const metaPath = path.join(this.uploadsDir, `${key}.meta`);
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
+      }
     } catch {
       // ignore
     }
@@ -311,9 +339,10 @@ export class PersistentDiskStorageProvider implements StorageProvider {
 export function getStorageProvider(env?: any): StorageProvider {
   const e = env || (typeof process !== 'undefined' ? process.env : {});
 
-  // 1. Native Cloudflare Workers R2 binding
-  if (e?.R2 && typeof e.R2.put === 'function') {
-    return new CloudflareR2StorageProvider(e.R2, e.R2_PUBLIC_URL);
+  // 1. Native Cloudflare Workers R2 binding (check variations)
+  const r2Binding = e?.R2 || e?.BUCKET || e?.STORAGE || e?.sphere || e?.['sphere-bucket'];
+  if (r2Binding && typeof r2Binding.put === 'function') {
+    return new CloudflareR2StorageProvider(r2Binding, e?.R2_PUBLIC_URL);
   }
 
   // 2. Real Cloudflare R2 S3 REST API (verified via Cloudflare S3 credentials)

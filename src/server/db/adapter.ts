@@ -2,8 +2,21 @@
  * Database Abstraction Layer for Sphere Social
  * Seamlessly abstracts Cloudflare D1, Node.js persistent SQLite, and in-memory serverless fallback.
  */
-import fs from 'node:fs';
-import path from 'node:path';
+
+function getNodeBuiltin(name: string): any {
+  if (typeof process === 'undefined') return null;
+  try {
+    if (typeof (process as any).getBuiltinModule === 'function') {
+      return (process as any).getBuiltinModule(name);
+    }
+    if (typeof (globalThis as any).require === 'function') {
+      return (globalThis as any).require(name);
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
 
 export interface D1PreparedStatement {
   bind(...values: any[]): D1PreparedStatement;
@@ -18,6 +31,12 @@ export interface DatabaseAdapter {
   batch?(statements: D1PreparedStatement[]): Promise<any[]>;
 }
 
+function sanitizeSqliteValue(val: any): any {
+  if (val === undefined) return null;
+  if (typeof val === 'boolean') return val ? 1 : 0;
+  return val;
+}
+
 /**
  * Cloudflare D1 Native Adapter
  * Used when running inside Cloudflare Workers with `env.DB` binding
@@ -26,11 +45,57 @@ export class D1DatabaseAdapter implements DatabaseAdapter {
   constructor(private d1: any) {}
 
   prepare(sql: string): D1PreparedStatement {
-    return this.d1.prepare(sql);
+    const self = this;
+    let boundParams: any[] = [];
+
+    const stmtObj: D1PreparedStatement = {
+      bind(...values: any[]): D1PreparedStatement {
+        boundParams = values.map(sanitizeSqliteValue);
+        return stmtObj;
+      },
+      async all<T = any>(): Promise<{ results: T[]; success: boolean }> {
+        const stmt = boundParams.length > 0 ? self.d1.prepare(sql).bind(...boundParams) : self.d1.prepare(sql);
+        const res = await stmt.all();
+        return {
+          results: (res?.results || []) as T[],
+          success: res?.success ?? true,
+        };
+      },
+      async first<T = any>(colName?: string): Promise<T | null> {
+        const stmt = boundParams.length > 0 ? self.d1.prepare(sql).bind(...boundParams) : self.d1.prepare(sql);
+        return await stmt.first(colName);
+      },
+      async run(): Promise<{ success: boolean; meta: { changes: number; last_row_id: number } }> {
+        const stmt = boundParams.length > 0 ? self.d1.prepare(sql).bind(...boundParams) : self.d1.prepare(sql);
+        const res = await stmt.run();
+        return {
+          success: res?.success ?? true,
+          meta: {
+            changes: res?.meta?.changes ?? 0,
+            last_row_id: res?.meta?.last_row_id ?? 0,
+          },
+        };
+      },
+    };
+
+    return stmtObj;
   }
 
   async exec(sql: string): Promise<void> {
-    await this.d1.exec(sql);
+    try {
+      await this.d1.exec(sql);
+    } catch (err: any) {
+      console.warn('[D1 exec notice, running statements individually]:', err?.message);
+      const cleanSql = sql.replace(/--.*$/gm, '').trim();
+      const statements = cleanSql
+        .split(';')
+        .map(s => s.trim())
+        .filter(s => s.length > 0);
+
+      for (const statement of statements) {
+        await this.d1.prepare(statement).run();
+      }
+    }
   }
 
   async batch(statements: D1PreparedStatement[]): Promise<any[]> {
@@ -138,12 +203,6 @@ try {
   // node:sqlite not present or in unsupported runtime
 }
 
-function sanitizeSqliteValue(val: any): any {
-  if (val === undefined) return null;
-  if (typeof val === 'boolean') return val ? 1 : 0;
-  return val;
-}
-
 function isServerlessEnvironment(): boolean {
   if (typeof process === 'undefined') return true;
   const env = process.env || {};
@@ -167,6 +226,12 @@ export class NodeSqliteAdapter implements DatabaseAdapter {
     if (!sqliteInstance) {
       if (!DatabaseSyncClass) {
         console.warn('[Sphere DB Warning]: node:sqlite not available on this Node runtime. Initializing in-memory fallback adapter.');
+        return;
+      }
+
+      const fs = getNodeBuiltin('node:fs') || getNodeBuiltin('fs');
+      const path = getNodeBuiltin('node:path') || getNodeBuiltin('path');
+      if (!fs || !path) {
         return;
       }
 
@@ -390,8 +455,17 @@ let sharedAdapterInstance: DatabaseAdapter | null = null;
  * Factory to obtain the database adapter based on runtime environment
  */
 export function getDatabaseAdapter(env?: any): DatabaseAdapter {
-  if (env && env.DB) {
-    return new D1DatabaseAdapter(env.DB);
+  const d1Binding =
+    env?.DB ||
+    env?.D1 ||
+    env?.DATABASE ||
+    env?.sphere_media ||
+    env?.['sphere-media'] ||
+    env?.SPHERE_DB ||
+    (typeof process !== 'undefined' ? (process.env as any)?.DB : undefined);
+
+  if (d1Binding && typeof d1Binding.prepare === 'function') {
+    return new D1DatabaseAdapter(d1Binding);
   }
 
   // Check for Cloudflare D1 Direct HTTP configuration

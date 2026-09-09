@@ -83,47 +83,17 @@ class ApiClient {
   }
 
   /**
-   * TikTok-speed instant feed preloader: combines cached feed and locally authored posts
+   * Cached feed accessor (falls back to empty array to ensure database is the source of truth)
    */
   getCachedFeed(): Post[] {
-    try {
-      const userPostsRaw = localStorage.getItem(USER_POSTS_KEY);
-      const userPosts: Post[] = userPostsRaw ? JSON.parse(userPostsRaw) : [];
-      const feedRaw = localStorage.getItem(FEED_CACHE_KEY);
-      const feedPosts: Post[] = feedRaw ? JSON.parse(feedRaw) : [];
-
-      const map = new Map<string, Post>();
-      userPosts.forEach(p => map.set(p.id, p));
-      feedPosts.forEach(p => {
-        if (!map.has(p.id)) map.set(p.id, p);
-      });
-
-      return Array.from(map.values()).sort((a, b) => b.createdAt - a.createdAt);
-    } catch {
-      return [];
-    }
+    return [];
   }
 
   /**
-   * Persists a newly created post locally so it remains instant and never disappears on refresh
+   * Invalidate any transient caches
    */
-  saveCreatedPost(post: Post) {
-    try {
-      const current = this.getCachedFeed();
-      const updated = [post, ...current.filter(p => p.id !== post.id)];
-
-      const userPostsRaw = localStorage.getItem(USER_POSTS_KEY);
-      const userPosts: Post[] = userPostsRaw ? JSON.parse(userPostsRaw) : [];
-      const updatedUserPosts = [post, ...userPosts.filter(p => p.id !== post.id)];
-
-      localStorage.setItem(USER_POSTS_KEY, JSON.stringify(updatedUserPosts));
-      localStorage.setItem(FEED_CACHE_KEY, JSON.stringify(updated.slice(0, 50)));
-
-      // Invalidate memory cache so next read gets the fresh post
-      this.memoryCache.delete('/api/posts?page=1&limit=8');
-    } catch {
-      // ignore
-    }
+  saveCreatedPost(_post: Post) {
+    this.memoryCache.clear();
   }
 
   private async tryRefreshToken(): Promise<boolean> {
@@ -271,63 +241,7 @@ class ApiClient {
     let url = `/api/posts?page=${page}&limit=${limit}`;
     if (userId) url += `&userId=${encodeURIComponent(userId)}`;
 
-    // If page 1 and no specific user filter, check memory cache for super-fast TikTok speed & quota saving
-    if (page === 1 && !userId) {
-      const cached = this.memoryCache.get(url);
-      if (cached && Date.now() - cached.timestamp < 15000) {
-        return cached.data;
-      }
-    }
-
-    try {
-      const res = await this.request<{ posts: Post[]; page: number; hasMore: boolean }>(url, { method: 'GET' });
-
-      // On page 1, merge locally authored user posts so user posts are 100% persistent and never disappear
-      if (page === 1 && !userId) {
-        const localPosts = this.getCachedFeed();
-        const postMap = new Map<string, Post>();
-
-        // Prioritize freshly authored local posts at top
-        localPosts.forEach(p => postMap.set(p.id, p));
-        res.posts.forEach(p => {
-          if (!postMap.has(p.id)) {
-            postMap.set(p.id, p);
-          } else {
-            // Keep server updated likes/comments count
-            const local = postMap.get(p.id)!;
-            postMap.set(p.id, {
-              ...local,
-              likesCount: Math.max(local.likesCount, p.likesCount),
-              commentsCount: Math.max(local.commentsCount, p.commentsCount),
-              hasLiked: p.hasLiked || local.hasLiked,
-            });
-          }
-        });
-
-        const merged = Array.from(postMap.values()).sort((a, b) => b.createdAt - a.createdAt);
-        const result = {
-          posts: merged.slice(0, Math.max(limit, merged.length)),
-          page: res.page,
-          hasMore: res.hasMore,
-        };
-
-        // Cache in memory and local storage
-        this.memoryCache.set(url, { data: result, timestamp: Date.now() });
-        localStorage.setItem(FEED_CACHE_KEY, JSON.stringify(result.posts.slice(0, 50)));
-        return result;
-      }
-
-      return res;
-    } catch (networkErr) {
-      // Offline / ephemeral container fallback for page 1
-      if (page === 1 && !userId) {
-        const cached = this.getCachedFeed();
-        if (cached.length > 0) {
-          return { posts: cached, page: 1, hasMore: false };
-        }
-      }
-      throw networkErr;
-    }
+    return await this.request<{ posts: Post[]; page: number; hasMore: boolean }>(url, { method: 'GET' });
   }
 
   async createPost(data: { imageUrl: string; caption?: string; song?: SongMetadata | null }): Promise<{ post: Post }> {
@@ -342,22 +256,9 @@ class ApiClient {
   }
 
   async toggleLike(postId: string): Promise<{ hasLiked: boolean; likesCount: number }> {
-    const res = await this.request<{ hasLiked: boolean; likesCount: number }>(`/api/posts/${postId}/like`, {
+    return await this.request<{ hasLiked: boolean; likesCount: number }>(`/api/posts/${postId}/like`, {
       method: 'POST',
     });
-
-    if (res) {
-      // Update local storage cache so it persists instantly
-      try {
-        const cached = this.getCachedFeed();
-        const updated = cached.map(p => p.id === postId ? { ...p, hasLiked: res.hasLiked, likesCount: res.likesCount } : p);
-        localStorage.setItem(FEED_CACHE_KEY, JSON.stringify(updated));
-      } catch {
-        // ignore
-      }
-    }
-
-    return res;
   }
 
   async getComments(postId: string): Promise<{ comments: Comment[] }> {
@@ -365,22 +266,10 @@ class ApiClient {
   }
 
   async addComment(postId: string, content: string): Promise<{ comment: Comment }> {
-    const res = await this.request<{ comment: Comment }>(`/api/posts/${postId}/comments`, {
+    return await this.request<{ comment: Comment }>(`/api/posts/${postId}/comments`, {
       method: 'POST',
       body: JSON.stringify({ content }),
     });
-
-    if (res?.comment) {
-      try {
-        const cached = this.getCachedFeed();
-        const updated = cached.map(p => p.id === postId ? { ...p, commentsCount: p.commentsCount + 1 } : p);
-        localStorage.setItem(FEED_CACHE_KEY, JSON.stringify(updated));
-      } catch {
-        // ignore
-      }
-    }
-
-    return res;
   }
 
   // Profile & Social
