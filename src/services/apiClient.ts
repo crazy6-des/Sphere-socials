@@ -285,8 +285,13 @@ class ApiClient {
   }
 
   // Profile & Social
-  async getUserProfile(username: string): Promise<{ profile: UserPublicProfile }> {
-    return this.request<{ profile: UserPublicProfile }>(`/api/users/${username}`, { method: 'GET' });
+  async getUserProfile(usernameOrTarget: string): Promise<{ profile: UserPublicProfile }> {
+    const endpoint = usernameOrTarget === 'me' ? '/api/users/me' : `/api/users/${encodeURIComponent(usernameOrTarget)}`;
+    return this.request<{ profile: UserPublicProfile }>(endpoint, { method: 'GET' });
+  }
+
+  async getMyProfile(): Promise<{ profile: UserPublicProfile }> {
+    return this.request<{ profile: UserPublicProfile }>('/api/users/me', { method: 'GET' });
   }
 
   async updateProfile(data: { displayName?: string; bio?: string; avatarUrl?: string }): Promise<{ user: User }> {

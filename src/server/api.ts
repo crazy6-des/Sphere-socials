@@ -143,34 +143,33 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
     });
   }
 
-  const db = getDatabaseAdapter(env);
   try {
-    await initializeDatabase(db);
-  } catch (dbInitErr: any) {
-    console.warn('[Sphere DB Init Handled]:', dbInitErr.message);
-  }
+    const db = getDatabaseAdapter(env);
+    try {
+      await initializeDatabase(db);
+    } catch (dbInitErr: any) {
+      console.warn('[Sphere DB Init Handled]:', dbInitErr.message);
+    }
 
-  const jwtSecret = env?.JWT_SECRET || (typeof process !== 'undefined' ? process.env?.JWT_SECRET : '') || 'sphere-jwt-secret-min-32-chars-key!';
-  const jwtRefreshSecret = env?.JWT_REFRESH_SECRET || (typeof process !== 'undefined' ? process.env?.JWT_REFRESH_SECRET : '') || 'sphere-jwt-refresh-secret-min-32-chars-key!';
-  const storage = getStorageProvider(env);
-  const rewardService = new RewardService(env);
-  const musicProvider = getMusicProvider(env);
-  const emailProvider = getEmailProvider(env);
-  const origin = request.headers.get('Origin') || request.headers.get('origin') || `${url.protocol}//${url.host}`;
+    const jwtSecret = env?.JWT_SECRET || (typeof process !== 'undefined' ? process.env?.JWT_SECRET : '') || 'sphere-jwt-secret-min-32-chars-key!';
+    const jwtRefreshSecret = env?.JWT_REFRESH_SECRET || (typeof process !== 'undefined' ? process.env?.JWT_REFRESH_SECRET : '') || 'sphere-jwt-refresh-secret-min-32-chars-key!';
+    const storage = getStorageProvider(env);
+    const rewardService = new RewardService(env);
+    const musicProvider = getMusicProvider(env);
+    const emailProvider = getEmailProvider(env);
+    const origin = request.headers.get('Origin') || request.headers.get('origin') || `${url.protocol}//${url.host}`;
 
-  const ctx: RouteContext = {
-    db,
-    env,
-    jwtSecret,
-    jwtRefreshSecret,
-    storage,
-    rewardService,
-    musicProvider,
-    emailProvider,
-    origin,
-  };
-
-  try {
+    const ctx: RouteContext = {
+      db,
+      env,
+      jwtSecret,
+      jwtRefreshSecret,
+      storage,
+      rewardService,
+      musicProvider,
+      emailProvider,
+      origin,
+    };
     // -------------------------------------------------------------
     // STORAGE SERVING: /api/storage/:key
     // -------------------------------------------------------------
@@ -1204,20 +1203,44 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
     }
 
     // -------------------------------------------------------------
-    // USER PROFILE: /api/users/:username
+    // USER PROFILE: /api/users/me, /api/users/me/profile, or /api/users/:target
     // -------------------------------------------------------------
-    const userMatch = path.match(/^\/api\/users\/([a-zA-Z0-9_-]+)$/);
-    if (userMatch && method === 'GET') {
-      const username = userMatch[1].toLowerCase();
-      const currentUserId = await getAuthUserId(request, ctx.jwtSecret, ctx.db);
+    const isMeProfile = (path === '/api/users/me' || path === '/api/users/me/profile');
+    const userMatch = !isMeProfile ? path.match(/^\/api\/users\/([a-zA-Z0-9_.-]+)$/) : null;
 
-      const userRow: any = await ctx.db
-        .prepare('SELECT id, username, display_name, bio, avatar_url, created_at FROM users WHERE username = ?')
-        .bind(username)
-        .first();
+    if ((isMeProfile || userMatch) && method === 'GET') {
+      const currentUserId = await getAuthUserId(request, ctx.jwtSecret, ctx.db);
+      let userRow: any = null;
+
+      if (isMeProfile || (userMatch && userMatch[1].toLowerCase() === 'me')) {
+        if (!currentUserId) {
+          return errorResponse('Authentication required to view your profile.', 401, request);
+        }
+        await ensureUserExistsInDb(ctx.db, currentUserId);
+        userRow = await ctx.db
+          .prepare('SELECT id, username, display_name, bio, avatar_url, created_at FROM users WHERE id = ?')
+          .bind(currentUserId)
+          .first();
+      } else if (userMatch) {
+        const rawTarget = userMatch[1];
+        // Query by case-insensitive username OR exact user ID
+        userRow = await ctx.db
+          .prepare('SELECT id, username, display_name, bio, avatar_url, created_at FROM users WHERE LOWER(username) = LOWER(?) OR id = ?')
+          .bind(rawTarget, rawTarget)
+          .first();
+
+        // If not found and target matches current authenticated user, heal user existence
+        if (!userRow && currentUserId && (rawTarget === currentUserId || rawTarget.toLowerCase() === 'me')) {
+          await ensureUserExistsInDb(ctx.db, currentUserId);
+          userRow = await ctx.db
+            .prepare('SELECT id, username, display_name, bio, avatar_url, created_at FROM users WHERE id = ?')
+            .bind(currentUserId)
+            .first();
+        }
+      }
 
       if (!userRow) {
-        return errorResponse('User profile not found', 404);
+        return errorResponse('User profile not found', 404, request);
       }
 
       const userId = userRow.id;
@@ -1265,7 +1288,7 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
         isFollowing,
       };
 
-      return jsonResponse({ success: true, data: { profile } });
+      return jsonResponse({ success: true, data: { profile } }, 200, {}, request);
     }
 
     // -------------------------------------------------------------

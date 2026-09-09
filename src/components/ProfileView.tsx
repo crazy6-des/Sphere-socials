@@ -11,7 +11,7 @@ interface ProfileViewProps {
 }
 
 export const ProfileView: React.FC<ProfileViewProps> = ({ targetUsername, onBack }) => {
-  const { user: authUser, logout, changePassword } = useAuth();
+  const { user: authUser, isLoading: authLoading, logout, changePassword } = useAuth();
   const [profile, setProfile] = useState<UserPublicProfile | null>(null);
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -77,29 +77,36 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ targetUsername, onBack
     }
   };
 
-  const isOwnProfile = !targetUsername || (authUser && authUser.username === targetUsername);
-  const activeUsername = targetUsername || authUser?.username;
+  const isOwnProfile = !targetUsername || (authUser && (authUser.username?.toLowerCase() === targetUsername.toLowerCase() || authUser.id === targetUsername));
+  const activeTarget = isOwnProfile ? 'me' : (targetUsername || authUser?.username);
+
+  const loadProfile = async () => {
+    if (authLoading) return;
+    if (!activeTarget) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = isOwnProfile 
+        ? await apiClient.getMyProfile()
+        : await apiClient.getUserProfile(activeTarget);
+      setProfile(res.profile);
+      setIsFollowing(Boolean(res.profile.isFollowing));
+
+      // Fetch user's posts
+      const postsRes = await apiClient.getPosts(1, 20, res.profile.id);
+      setPosts(postsRes.posts);
+    } catch (err) {
+      console.error('[Profile] Failed to load profile:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    async function loadProfile() {
-      if (!activeUsername) return;
-      setLoading(true);
-      try {
-        const res = await apiClient.getUserProfile(activeUsername);
-        setProfile(res.profile);
-        setIsFollowing(Boolean(res.profile.isFollowing));
-
-        // Fetch user's posts
-        const postsRes = await apiClient.getPosts(1, 20, res.profile.id);
-        setPosts(postsRes.posts);
-      } catch (err) {
-        console.error('[Profile] Failed to load profile:', err);
-      } finally {
-        setLoading(false);
-      }
-    }
     loadProfile();
-  }, [activeUsername]);
+  }, [activeTarget, authLoading]);
 
   const handleToggleFollow = async () => {
     if (!profile || isOwnProfile) return;
@@ -119,7 +126,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ targetUsername, onBack
     }
   };
 
-  if (loading && !profile) {
+  if (authLoading || (loading && !profile)) {
     return (
       <div className="h-[calc(100vh-4rem)] flex items-center justify-center bg-black text-zinc-500">
         <Loader2 className="w-6 h-6 animate-spin text-white mr-2" />
@@ -129,17 +136,35 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ targetUsername, onBack
   }
 
   if (!profile) {
+    if (!authUser && !targetUsername) {
+      return (
+        <div className="h-[calc(100vh-4rem)] flex flex-col items-center justify-center bg-black text-zinc-400 text-xs text-center p-6 space-y-4">
+          <p className="text-sm font-semibold text-white">Sign In Required</p>
+          <p>Sign in to view your profile, uploaded photos, and rewards balance.</p>
+        </div>
+      );
+    }
+
     return (
       <div className="h-[calc(100vh-4rem)] flex flex-col items-center justify-center bg-black text-zinc-500 text-xs text-center p-6">
-        <p>Profile not found.</p>
-        {onBack && (
+        <p className="text-sm font-semibold text-zinc-300 mb-1">Profile not found</p>
+        <p className="text-zinc-500 mb-4">The requested profile could not be loaded.</p>
+        <div className="flex gap-2">
           <button
-            onClick={onBack}
-            className="mt-4 px-4 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-white"
+            onClick={() => loadProfile()}
+            className="px-4 py-2 rounded-xl bg-white text-black font-semibold text-xs"
           >
-            Back
+            Try Again
           </button>
-        )}
+          {onBack && (
+            <button
+              onClick={onBack}
+              className="px-4 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-white"
+            >
+              Back
+            </button>
+          )}
+        </div>
       </div>
     );
   }

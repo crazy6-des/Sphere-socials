@@ -26,12 +26,23 @@ export default async (req: Request) => {
         const proxyHeaders = new Headers(req.headers);
         proxyHeaders.set('host', new URL(workerUrl).host);
 
+        // Forward Cloudflare Access service tokens if configured
+        if (process.env.CF_ACCESS_CLIENT_ID && process.env.CF_ACCESS_CLIENT_SECRET) {
+          proxyHeaders.set('CF-Access-Client-Id', process.env.CF_ACCESS_CLIENT_ID);
+          proxyHeaders.set('CF-Access-Client-Secret', process.env.CF_ACCESS_CLIENT_SECRET);
+        }
+
         const res = await fetch(target, {
           method: req.method,
           headers: proxyHeaders,
           body: bodyBuffer,
+          redirect: 'manual',
         });
-        if (res.ok || res.status < 500) {
+
+        const locationHeader = res.headers.get('location') || '';
+        const isAccessRedirect = res.status === 302 || locationHeader.includes('cloudflareaccess.com');
+
+        if (!isAccessRedirect && res.status < 500) {
           return res;
         }
       } catch (proxyErr: any) {
