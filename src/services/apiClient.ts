@@ -237,11 +237,17 @@ class ApiClient {
   }
 
   // Feed & Posts (Optimized for TikTok-speed rendering, offline persistence & quota saving)
-  async getPosts(page: number = 1, limit: number = 8, userId?: string): Promise<{ posts: Post[]; page: number; hasMore: boolean }> {
-    let url = `/api/posts?page=${page}&limit=${limit}`;
+  async getPosts(page: number = 1, limit: number = 8, userId?: string, feedType: 'forYou' | 'following' = 'forYou'): Promise<{ posts: Post[]; page: number; hasMore: boolean }> {
+    let url = `/api/posts?page=${page}&limit=${limit}&feed=${feedType}`;
     if (userId) url += `&userId=${encodeURIComponent(userId)}`;
 
     return await this.request<{ posts: Post[]; page: number; hasMore: boolean }>(url, { method: 'GET' });
+  }
+
+  async deletePost(postId: string): Promise<{ success: boolean; message: string }> {
+    return this.request<{ success: boolean; message: string }>(`/api/posts/${postId}`, {
+      method: 'DELETE',
+    });
   }
 
   async createPost(data: { imageUrl: string; caption?: string; song?: SongMetadata | null }): Promise<{ post: Post }> {
@@ -269,6 +275,12 @@ class ApiClient {
     return await this.request<{ comment: Comment }>(`/api/posts/${postId}/comments`, {
       method: 'POST',
       body: JSON.stringify({ content }),
+    });
+  }
+
+  async deleteComment(commentId: string): Promise<{ success: boolean; message: string; data?: { commentsCount: number } }> {
+    return this.request<{ success: boolean; message: string; data?: { commentsCount: number } }>(`/api/comments/${commentId}`, {
+      method: 'DELETE',
     });
   }
 

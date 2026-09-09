@@ -123,6 +123,8 @@ export interface UserSettings {
   privateProfile: boolean;
   notificationsEnabled: boolean;
   dataSaver: boolean;
+  theme?: 'dark' | 'light';
+  accentColor?: 'indigo' | 'emerald' | 'amber' | 'slate' | 'rose';
   updatedAt?: number;
 }
 

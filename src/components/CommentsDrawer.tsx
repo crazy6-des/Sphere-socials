@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Send, Loader2 } from 'lucide-react';
+import { X, Send, Loader2, Trash2 } from 'lucide-react';
 import { Comment } from '../types';
 import { apiClient } from '../services/apiClient';
 import { useAuth } from '../context/AuthContext';
@@ -8,13 +8,15 @@ interface CommentsDrawerProps {
   postId: string;
   onClose: () => void;
   onCommentAdded: () => void;
+  onCommentRemoved?: () => void;
 }
 
-export const CommentsDrawer: React.FC<CommentsDrawerProps> = ({ postId, onClose, onCommentAdded }) => {
+export const CommentsDrawer: React.FC<CommentsDrawerProps> = ({ postId, onClose, onCommentAdded, onCommentRemoved }) => {
   const { user } = useAuth();
   const [comments, setComments] = useState<Comment[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [deletingCommentId, setDeletingCommentId] = useState<string | null>(null);
   const [newComment, setNewComment] = useState('');
   const [error, setError] = useState<string | null>(null);
 
@@ -52,6 +54,20 @@ export const CommentsDrawer: React.FC<CommentsDrawerProps> = ({ postId, onClose,
       setError(err.message || 'Failed to post comment');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleDelete = async (commentId: string) => {
+    if (deletingCommentId) return;
+    setDeletingCommentId(commentId);
+    try {
+      await apiClient.deleteComment(commentId);
+      setComments((prev) => prev.filter((c) => c.id !== commentId));
+      onCommentRemoved?.();
+    } catch (err: any) {
+      setError(err.message || 'Failed to delete comment');
+    } finally {
+      setDeletingCommentId(null);
     }
   };
 
@@ -116,6 +132,22 @@ export const CommentsDrawer: React.FC<CommentsDrawerProps> = ({ postId, onClose,
                     {comment.content}
                   </p>
                 </div>
+                {user && user.id === comment.userId && (
+                  <button
+                    type="button"
+                    id={`btn-delete-comment-${comment.id}`}
+                    onClick={() => handleDelete(comment.id)}
+                    disabled={deletingCommentId === comment.id}
+                    title="Delete your comment"
+                    className="p-1 text-zinc-500 hover:text-red-400 transition-colors shrink-0"
+                  >
+                    {deletingCommentId === comment.id ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-500" />
+                    ) : (
+                      <Trash2 className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                )}
               </div>
             ))
           )}

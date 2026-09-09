@@ -43,6 +43,38 @@ app.all('/api/*', async (req, res) => {
       duplex: 'half',
     });
 
+    // If CLOUDFLARE_WORKER_URL is configured, attempt forwarding to the worker
+    const workerUrl = process.env.CLOUDFLARE_WORKER_URL;
+    if (workerUrl && !req.headers['x-bypass-worker']) {
+      try {
+        const workerTarget = `${workerUrl.replace(/\/$/, '')}${req.originalUrl}`;
+        const proxyHeaders = new Headers(headers);
+        proxyHeaders.set('host', new URL(workerUrl).host);
+
+        const workerRes = await fetch(workerTarget, {
+          method: req.method,
+          headers: proxyHeaders,
+          body: bodyData,
+          redirect: 'manual',
+          // @ts-ignore
+          duplex: 'half',
+        });
+
+        const isRedirectToAccess = workerRes.status === 302 || workerRes.headers.get('location')?.includes('cloudflareaccess.com');
+        if (!isRedirectToAccess && workerRes.status < 500) {
+          res.status(workerRes.status);
+          workerRes.headers.forEach((val, key) => {
+            res.setHeader(key, val);
+          });
+          const arrayBuf = await workerRes.arrayBuffer();
+          res.send(Buffer.from(arrayBuf));
+          return;
+        }
+      } catch (workerErr: any) {
+        // Fallback to authoritative serverless handler
+      }
+    }
+
     const webRes = await handleServerlessRequest(webReq, process.env);
 
     res.status(webRes.status);

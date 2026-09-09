@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { Navigation, TabType } from './components/Navigation';
 import { LandingView } from './components/LandingView';
@@ -7,6 +7,7 @@ import { EarnView } from './components/EarnView';
 import { WalletView } from './components/WalletView';
 import { ProfileView } from './components/ProfileView';
 import { PostCreationModal } from './components/PostCreationModal';
+import { apiClient } from './services/apiClient';
 import { Loader2 } from 'lucide-react';
 
 function SphereMain() {
@@ -15,6 +16,29 @@ function SphereMain() {
   const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
   const [inspectedCreator, setInspectedCreator] = useState<string | null>(null);
   const [feedRefreshKey, setFeedRefreshKey] = useState<number>(0);
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      apiClient
+        .getUserSettings()
+        .then((res) => {
+          if (res?.settings) {
+            const root = document.documentElement;
+            if (res.settings.theme === 'light') {
+              root.classList.remove('dark');
+              root.classList.add('light');
+            } else {
+              root.classList.remove('light');
+              root.classList.add('dark');
+            }
+            if (res.settings.accentColor) {
+              root.setAttribute('data-accent', res.settings.accentColor);
+            }
+          }
+        })
+        .catch(() => {});
+    }
+  }, [isAuthenticated]);
 
   if (isLoading) {
     return (

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { User, LogOut, Grid, Heart, MessageCircle, Music, Shield, ArrowLeft, Loader2, KeyRound, Check, Lock, Settings, Edit3, Database, Bell, Volume2, ShieldCheck, Mail } from 'lucide-react';
+import { User, LogOut, Grid, Heart, MessageCircle, Music, Shield, ArrowLeft, Loader2, KeyRound, Check, Lock, Settings, Edit3, Database, Bell, Volume2, ShieldCheck, Mail, Sun, Moon, Palette } from 'lucide-react';
 import { UserPublicProfile, Post, UserSettings, SystemStatus } from '../types';
 import { apiClient } from '../services/apiClient';
 import { useAuth } from '../context/AuthContext';
@@ -43,11 +43,39 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ targetUsername, onBack
     privateProfile: false,
     notificationsEnabled: true,
     dataSaver: false,
+    theme: 'dark',
+    accentColor: 'indigo',
     updatedAt: Date.now(),
   });
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [loadingSettings, setLoadingSettings] = useState<boolean>(false);
   const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
+
+  const handleUpdateSetting = async (patch: Partial<UserSettings>, noticeMsg: string) => {
+    setUserSettings((prev) => ({ ...prev, ...patch }));
+    if (patch.theme || patch.accentColor) {
+      const theme = patch.theme || userSettings.theme || 'dark';
+      const accent = patch.accentColor || userSettings.accentColor || 'indigo';
+      if (typeof document !== 'undefined') {
+        const root = document.documentElement;
+        if (theme === 'light') {
+          root.classList.remove('dark');
+          root.classList.add('light');
+        } else {
+          root.classList.remove('light');
+          root.classList.add('dark');
+        }
+        root.setAttribute('data-accent', accent);
+      }
+    }
+    try {
+      await apiClient.updateUserSettings(patch);
+      setSettingsNotice(noticeMsg);
+      setTimeout(() => setSettingsNotice(null), 2500);
+    } catch {
+      setSettingsNotice('Failed to persist setting.');
+    }
+  };
 
   const isOwnProfile = !targetUsername || (authUser && authUser.username === targetUsername);
   const activeUsername = targetUsername || authUser?.username;
@@ -149,6 +177,19 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ targetUsername, onBack
                   ]);
                   if (settingsRes?.settings) {
                     setUserSettings(settingsRes.settings);
+                    const t = settingsRes.settings.theme || 'dark';
+                    const a = settingsRes.settings.accentColor || 'indigo';
+                    if (typeof document !== 'undefined') {
+                      const root = document.documentElement;
+                      if (t === 'light') {
+                        root.classList.remove('dark');
+                        root.classList.add('light');
+                      } else {
+                        root.classList.remove('light');
+                        root.classList.add('dark');
+                      }
+                      root.setAttribute('data-accent', a);
+                    }
                   }
                   if (statusRes?.data) {
                     setSystemStatus(statusRes.data);
@@ -695,6 +736,73 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ targetUsername, onBack
               </div>
             ) : (
               <div className="space-y-4">
+                {/* Appearance & Theme Mode */}
+                <div className="p-3.5 rounded-xl bg-zinc-900/70 border border-zinc-800/80 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-2.5">
+                      <Moon className="w-4 h-4 text-zinc-400" />
+                      <div>
+                        <p className="text-xs font-medium text-white">Appearance Theme</p>
+                        <p className="text-[10px] text-zinc-500">Persisted in database & profile</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center space-x-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800">
+                      <button
+                        type="button"
+                        id="btn-theme-dark"
+                        onClick={() => handleUpdateSetting({ theme: 'dark' }, 'Dark theme saved.')}
+                        className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium transition-all ${
+                          userSettings.theme !== 'light' ? 'bg-zinc-800 text-white shadow-xs' : 'text-zinc-500 hover:text-zinc-300'
+                        }`}
+                      >
+                        <Moon className="w-3 h-3" />
+                        <span>Dark</span>
+                      </button>
+                      <button
+                        type="button"
+                        id="btn-theme-light"
+                        onClick={() => handleUpdateSetting({ theme: 'light' }, 'Light theme saved.')}
+                        className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium transition-all ${
+                          userSettings.theme === 'light' ? 'bg-zinc-200 text-black shadow-xs' : 'text-zinc-500 hover:text-zinc-300'
+                        }`}
+                      >
+                        <Sun className="w-3 h-3" />
+                        <span>Light</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Accent Color Picker */}
+                  <div className="pt-2.5 border-t border-zinc-800/60 flex items-center justify-between">
+                    <div className="flex items-center space-x-2">
+                      <Palette className="w-3.5 h-3.5 text-zinc-400" />
+                      <span className="text-[11px] text-zinc-400">Accent Tone</span>
+                    </div>
+                    <div className="flex items-center space-x-2">
+                      {[
+                        { id: 'indigo', label: 'Indigo', bg: 'bg-indigo-500' },
+                        { id: 'emerald', label: 'Emerald', bg: 'bg-emerald-500' },
+                        { id: 'amber', label: 'Amber', bg: 'bg-amber-500' },
+                        { id: 'slate', label: 'Slate', bg: 'bg-slate-400' },
+                        { id: 'rose', label: 'Rose', bg: 'bg-rose-500' },
+                      ].map((c) => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          id={`accent-${c.id}`}
+                          title={c.label}
+                          onClick={() => handleUpdateSetting({ accentColor: c.id as any }, `${c.label} accent saved.`)}
+                          className={`w-5 h-5 rounded-full ${c.bg} transition-all ${
+                            (userSettings.accentColor || 'indigo') === c.id
+                              ? 'ring-2 ring-white ring-offset-2 ring-offset-zinc-950 scale-110'
+                              : 'opacity-60 hover:opacity-100'
+                          }`}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
                 {/* Toggles */}
                 <div className="space-y-2.5">
                   {/* Autoplay Audio */}

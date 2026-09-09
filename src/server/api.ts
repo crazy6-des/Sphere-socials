@@ -419,17 +419,11 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
     }
 
     if (path === '/api/auth/me' && method === 'GET') {
-      const authHeader = request.headers.get('Authorization') || request.headers.get('authorization');
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return errorResponse('Unauthorized', 401, request);
-      }
-      const token = authHeader.substring(7).trim();
-      const payload = await verifyJwt<{ userId: string; username?: string }>(token, ctx.jwtSecret);
-      if (!payload?.userId) {
-        return errorResponse('Invalid or expired authentication session', 401, request);
+      const currentUserId = await getAuthUserId(request, ctx.jwtSecret, ctx.db);
+      if (!currentUserId) {
+        return errorResponse('Invalid, expired, or revoked authentication session', 401, request);
       }
 
-      const currentUserId = payload.userId;
       let row: any = await db
         .prepare('SELECT id, username, email, display_name, bio, avatar_url, created_at FROM users WHERE id = ?')
         .bind(currentUserId)
@@ -438,7 +432,10 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
       if (!row) {
         // Auto-recover user in fresh container from cryptographic JWT payload
         const now = Date.now();
-        const username = payload.username || `user_${currentUserId.slice(-6)}`;
+        const authHeader = request.headers.get('Authorization') || request.headers.get('authorization') || '';
+        const token = authHeader.substring(7).trim();
+        const payload = await verifyJwt<{ userId: string; username?: string }>(token, ctx.jwtSecret);
+        const username = payload?.username || `user_${currentUserId.slice(-6)}`;
         const email = `${username}@sphere-social.app`;
         const displayName = username.charAt(0).toUpperCase() + username.slice(1);
         const avatarUrl = `https://api.dicebear.com/7.x/identicon/svg?seed=${username}`;
@@ -792,6 +789,7 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
       const offset = (page - 1) * limit;
       const targetUserId = url.searchParams.get('userId');
 
+      const sanitizedUserId = currentUserId ? currentUserId.replace(/[^a-zA-Z0-9_-]/g, '') : null;
       let query = `
         SELECT 
           p.id, p.user_id, p.image_url, p.caption,
@@ -800,19 +798,33 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
           COALESCE(u.username, 'creator') AS username,
           COALESCE(u.display_name, 'Creator') AS display_name,
           COALESCE(u.avatar_url, 'https://api.dicebear.com/7.x/identicon/svg?seed=' || p.user_id) AS avatar_url,
-          ${currentUserId ? `(SELECT 1 FROM likes l WHERE l.post_id = p.id AND l.user_id = '${currentUserId}') AS has_liked` : '0 AS has_liked'},
-          ${currentUserId ? `(SELECT 1 FROM follows f WHERE f.following_id = p.user_id AND f.follower_id = '${currentUserId}') AS is_following` : '0 AS is_following'}
+          ${sanitizedUserId ? `(SELECT 1 FROM likes l WHERE l.post_id = p.id AND l.user_id = '${sanitizedUserId}') AS has_liked` : '0 AS has_liked'},
+          ${sanitizedUserId ? `(SELECT 1 FROM follows f WHERE f.following_id = p.user_id AND f.follower_id = '${sanitizedUserId}') AS is_following` : '0 AS is_following'}
         FROM posts p
         LEFT JOIN users u ON p.user_id = u.id
       `;
 
+      const feedType = url.searchParams.get('feed') || 'forYou';
       const params: any[] = [];
+      const whereClauses: string[] = [];
+
       if (targetUserId) {
-        query += ' WHERE p.user_id = ?';
+        whereClauses.push('p.user_id = ?');
         params.push(targetUserId);
+      } else if (feedType === 'following' && sanitizedUserId) {
+        whereClauses.push('p.user_id IN (SELECT following_id FROM follows WHERE follower_id = ?)');
+        params.push(sanitizedUserId);
       }
 
-      query += ' ORDER BY p.created_at DESC LIMIT ? OFFSET ?';
+      if (whereClauses.length > 0) {
+        query += ' WHERE ' + whereClauses.join(' AND ');
+      }
+
+      if (feedType === 'forYou') {
+        query += ' ORDER BY (p.likes_count * 2 + p.comments_count * 3) DESC, p.created_at DESC LIMIT ? OFFSET ?';
+      } else {
+        query += ' ORDER BY p.created_at DESC LIMIT ? OFFSET ?';
+      }
       params.push(limit + 1, offset);
 
       const statement = ctx.db.prepare(query).bind(...params);
@@ -926,6 +938,92 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
       };
 
       return jsonResponse({ success: true, data: { post: createdPost } });
+    }
+
+    // -------------------------------------------------------------
+    // SINGLE POST: /api/posts/:id (GET & DELETE with ownership verification)
+    // -------------------------------------------------------------
+    const singlePostMatch = path.match(/^\/api\/posts\/([a-zA-Z0-9_-]+)$/);
+    if (singlePostMatch) {
+      const postId = singlePostMatch[1];
+
+      if (method === 'GET') {
+        const currentUserId = await getAuthUserId(request, ctx.jwtSecret, ctx.db);
+        const sanitizedUserId = currentUserId ? currentUserId.replace(/[^a-zA-Z0-9_-]/g, '') : null;
+        const r: any = await ctx.db
+          .prepare(
+            `SELECT 
+              p.id, p.user_id, p.image_url, p.caption,
+              p.song_title, p.song_artist, p.song_album, p.song_artwork_url, p.song_preview_url, p.song_provider_id,
+              p.likes_count, p.comments_count, p.created_at,
+              COALESCE(u.username, 'creator') AS username,
+              COALESCE(u.display_name, 'Creator') AS display_name,
+              COALESCE(u.avatar_url, 'https://api.dicebear.com/7.x/identicon/svg?seed=' || p.user_id) AS avatar_url,
+              ${sanitizedUserId ? `(SELECT 1 FROM likes l WHERE l.post_id = p.id AND l.user_id = '${sanitizedUserId}') AS has_liked` : '0 AS has_liked'},
+              ${sanitizedUserId ? `(SELECT 1 FROM follows f WHERE f.following_id = p.user_id AND f.follower_id = '${sanitizedUserId}') AS is_following` : '0 AS is_following'}
+            FROM posts p
+            LEFT JOIN users u ON p.user_id = u.id
+            WHERE p.id = ?`
+          )
+          .bind(postId)
+          .first();
+
+        if (!r) {
+          return errorResponse('Post not found', 404, request);
+        }
+
+        const post: Post = {
+          id: r.id,
+          userId: r.user_id,
+          author: {
+            id: r.user_id,
+            username: r.username,
+            displayName: r.display_name,
+            avatarUrl: r.avatar_url,
+          },
+          imageUrl: r.image_url,
+          caption: r.caption || '',
+          song: r.song_title
+            ? {
+                title: r.song_title,
+                artist: r.song_artist || '',
+                album: r.song_album,
+                artworkUrl: r.song_artwork_url,
+                previewUrl: r.song_preview_url,
+                providerId: r.song_provider_id,
+              }
+            : null,
+          likesCount: Number(r.likes_count || 0),
+          commentsCount: Number(r.comments_count || 0),
+          hasLiked: Boolean(r.has_liked),
+          isFollowingAuthor: Boolean(r.is_following),
+          createdAt: Number(r.created_at),
+        };
+
+        return jsonResponse({ success: true, data: { post } });
+      }
+
+      if (method === 'DELETE') {
+        const currentUserId = await getAuthUserId(request, ctx.jwtSecret, ctx.db);
+        if (!currentUserId) {
+          return errorResponse('Authentication required to delete post.', 401, request);
+        }
+
+        const existingPost: any = await ctx.db.prepare('SELECT id, user_id FROM posts WHERE id = ?').bind(postId).first();
+        if (!existingPost) {
+          return errorResponse('Post not found.', 404, request);
+        }
+
+        if (existingPost.user_id !== currentUserId) {
+          return errorResponse('Access denied. You can only delete your own posts.', 403, request);
+        }
+
+        await ctx.db.prepare('DELETE FROM likes WHERE post_id = ?').bind(postId).run();
+        await ctx.db.prepare('DELETE FROM comments WHERE post_id = ?').bind(postId).run();
+        await ctx.db.prepare('DELETE FROM posts WHERE id = ?').bind(postId).run();
+
+        return jsonResponse({ success: true, message: 'Post deleted successfully.' }, 200, {}, request);
+      }
     }
 
     // -------------------------------------------------------------
@@ -1077,6 +1175,35 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
     }
 
     // -------------------------------------------------------------
+    // DELETE COMMENT: /api/comments/:id or /api/posts/:postId/comments/:id
+    // -------------------------------------------------------------
+    const commentDeleteMatch = path.match(/^\/api\/(?:posts\/[a-zA-Z0-9_-]+\/)?comments\/([a-zA-Z0-9_-]+)$/);
+    if (commentDeleteMatch && method === 'DELETE') {
+      const commentId = commentDeleteMatch[1];
+      const currentUserId = await getAuthUserId(request, ctx.jwtSecret, ctx.db);
+      if (!currentUserId) {
+        return errorResponse('Authentication required to delete comment.', 401, request);
+      }
+
+      const comment: any = await ctx.db.prepare('SELECT id, post_id, user_id FROM comments WHERE id = ?').bind(commentId).first();
+      if (!comment) {
+        return errorResponse('Comment not found.', 404, request);
+      }
+
+      if (comment.user_id !== currentUserId) {
+        return errorResponse('Access denied. You can only delete your own comments.', 403, request);
+      }
+
+      await ctx.db.prepare('DELETE FROM comments WHERE id = ?').bind(commentId).run();
+
+      const countRow: any = await ctx.db.prepare('SELECT COUNT(*) as cnt FROM comments WHERE post_id = ?').bind(comment.post_id).first();
+      const newCommentsCount = Number(countRow?.cnt || 0);
+      await ctx.db.prepare('UPDATE posts SET comments_count = ? WHERE id = ?').bind(newCommentsCount, comment.post_id).run();
+
+      return jsonResponse({ success: true, message: 'Comment deleted successfully.', data: { commentsCount: newCommentsCount } }, 200, {}, request);
+    }
+
+    // -------------------------------------------------------------
     // USER PROFILE: /api/users/:username
     // -------------------------------------------------------------
     const userMatch = path.match(/^\/api\/users\/([a-zA-Z0-9_-]+)$/);
@@ -1185,23 +1312,23 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
     // -------------------------------------------------------------
     // USER SETTINGS & PROFILE ALIGNMENT: /api/users/me/*
     // -------------------------------------------------------------
-    if (path === '/api/users/me/settings' && method === 'GET') {
+    if ((path === '/api/users/me/settings' || path === '/api/users/settings') && method === 'GET') {
       const currentUserId = await getAuthUserId(request, ctx.jwtSecret, ctx.db);
       if (!currentUserId) return errorResponse('Authentication required.', 401, request);
       await ensureUserExistsInDb(ctx.db, currentUserId);
 
       let row: any = await ctx.db
-        .prepare('SELECT autoplay_audio, private_profile, notifications_enabled, data_saver, updated_at FROM user_settings WHERE user_id = ?')
+        .prepare('SELECT autoplay_audio, private_profile, notifications_enabled, data_saver, theme, accent_color, updated_at FROM user_settings WHERE user_id = ?')
         .bind(currentUserId)
         .first();
 
       if (!row) {
         const now = Date.now();
         await ctx.db
-          .prepare('INSERT OR IGNORE INTO user_settings (user_id, autoplay_audio, private_profile, notifications_enabled, data_saver, updated_at) VALUES (?, 1, 0, 1, 0, ?)')
-          .bind(currentUserId, now)
+          .prepare('INSERT OR IGNORE INTO user_settings (user_id, autoplay_audio, private_profile, notifications_enabled, data_saver, theme, accent_color, updated_at) VALUES (?, 1, 0, 1, 0, ?, ?, ?)')
+          .bind(currentUserId, 'dark', 'indigo', now)
           .run();
-        row = { autoplay_audio: 1, private_profile: 0, notifications_enabled: 1, data_saver: 0, updated_at: now };
+        row = { autoplay_audio: 1, private_profile: 0, notifications_enabled: 1, data_saver: 0, theme: 'dark', accent_color: 'indigo', updated_at: now };
       }
 
       return jsonResponse({
@@ -1212,13 +1339,15 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
             privateProfile: Boolean(row.private_profile),
             notificationsEnabled: Boolean(row.notifications_enabled),
             dataSaver: Boolean(row.data_saver),
+            theme: (row.theme === 'light' ? 'light' : 'dark') as 'dark' | 'light',
+            accentColor: (['indigo', 'emerald', 'amber', 'slate', 'rose'].includes(row.accent_color) ? row.accent_color : 'indigo') as 'indigo' | 'emerald' | 'amber' | 'slate' | 'rose',
             updatedAt: Number(row.updated_at),
           },
         },
       }, 200, {}, request);
     }
 
-    if (path === '/api/users/me/settings' && method === 'PUT') {
+    if ((path === '/api/users/me/settings' || path === '/api/users/settings') && method === 'PUT') {
       const currentUserId = await getAuthUserId(request, ctx.jwtSecret, ctx.db);
       if (!currentUserId) return errorResponse('Authentication required.', 401, request);
       await ensureUserExistsInDb(ctx.db, currentUserId);
@@ -1228,20 +1357,25 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
       const privateProfile = body.privateProfile ? 1 : 0;
       const notifs = body.notificationsEnabled !== false ? 1 : 0;
       const dataSaver = body.dataSaver ? 1 : 0;
+      const theme = body.theme === 'light' ? 'light' : 'dark';
+      const validAccents = ['indigo', 'emerald', 'amber', 'slate', 'rose'];
+      const accent = validAccents.includes(body.accentColor) ? body.accentColor : 'indigo';
       const now = Date.now();
 
       await ctx.db
         .prepare(`
-          INSERT INTO user_settings (user_id, autoplay_audio, private_profile, notifications_enabled, data_saver, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?)
+          INSERT INTO user_settings (user_id, autoplay_audio, private_profile, notifications_enabled, data_saver, theme, accent_color, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(user_id) DO UPDATE SET
             autoplay_audio = excluded.autoplay_audio,
             private_profile = excluded.private_profile,
             notifications_enabled = excluded.notifications_enabled,
             data_saver = excluded.data_saver,
+            theme = excluded.theme,
+            accent_color = excluded.accent_color,
             updated_at = excluded.updated_at
         `)
-        .bind(currentUserId, autoplay, privateProfile, notifs, dataSaver, now)
+        .bind(currentUserId, autoplay, privateProfile, notifs, dataSaver, theme, accent, now)
         .run();
 
       return jsonResponse({
@@ -1252,6 +1386,8 @@ export async function handleServerlessRequest(request: Request, env: any = {}): 
             privateProfile: Boolean(privateProfile),
             notificationsEnabled: Boolean(notifs),
             dataSaver: Boolean(dataSaver),
+            theme,
+            accentColor: accent,
             updatedAt: now,
           },
         },

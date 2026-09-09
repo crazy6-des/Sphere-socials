@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Heart, MessageCircle, Share2, Music, Volume2, VolumeX, Plus, Loader2, Check } from 'lucide-react';
+import { Heart, MessageCircle, Share2, Music, Volume2, VolumeX, Plus, Loader2, Check, Trash2 } from 'lucide-react';
 import { Post } from '../types';
 import { apiClient } from '../services/apiClient';
 import { useAuth } from '../context/AuthContext';
@@ -27,14 +27,15 @@ export const FeedView: React.FC<FeedViewProps> = ({ onOpenCreate, onSelectCreato
     setTimeout(() => setToastNotice(null), 2500);
   };
 
+  const [feedMode, setFeedMode] = useState<'forYou' | 'following'>('forYou');
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const feedContainerRef = useRef<HTMLDivElement | null>(null);
 
   // Load feed posts
-  const fetchPosts = async (pageNum: number, refresh = false) => {
-    if (pageNum === 1 && posts.length === 0) setLoading(true);
+  const fetchPosts = async (pageNum: number, refresh = false, targetFeed = feedMode) => {
+    if (pageNum === 1 && (refresh || posts.length === 0)) setLoading(true);
     try {
-      const res = await apiClient.getPosts(pageNum, 8);
+      const res = await apiClient.getPosts(pageNum, 8, undefined, targetFeed);
       setPosts((prev) => (refresh || pageNum === 1 ? res.posts : [...prev, ...res.posts]));
       setHasMore(res.hasMore);
       setPage(res.page);
@@ -46,7 +47,7 @@ export const FeedView: React.FC<FeedViewProps> = ({ onOpenCreate, onSelectCreato
   };
 
   useEffect(() => {
-    fetchPosts(1, true);
+    fetchPosts(1, true, feedMode);
   }, []);
 
   // Handle Like
@@ -163,6 +164,18 @@ export const FeedView: React.FC<FeedViewProps> = ({ onOpenCreate, onSelectCreato
     }
   };
 
+  // Handle Delete Post (Creator ownership)
+  const handleDeletePost = async (postId: string) => {
+    if (!window.confirm('Are you sure you want to delete this post?')) return;
+    try {
+      await apiClient.deletePost(postId);
+      setPosts((prev) => prev.filter((p) => p.id !== postId));
+      showToast('Post deleted successfully.');
+    } catch (err: any) {
+      showToast(err.message || 'Failed to delete post.');
+    }
+  };
+
   if (loading && posts.length === 0) {
     return (
       <div className="h-[calc(100vh-4rem)] flex flex-col items-center justify-center bg-black text-zinc-400">
@@ -174,20 +187,56 @@ export const FeedView: React.FC<FeedViewProps> = ({ onOpenCreate, onSelectCreato
 
   if (!loading && posts.length === 0) {
     return (
-      <div className="h-[calc(100vh-4rem)] flex flex-col items-center justify-center bg-black text-center px-6 max-w-md mx-auto">
+      <div className="h-[calc(100vh-4rem)] flex flex-col items-center justify-center bg-black text-center px-6 max-w-md mx-auto relative">
+        <div className="absolute top-4 inset-x-4 flex items-center justify-between z-20">
+          <span className="font-bold tracking-wider text-sm drop-shadow-md text-white">Sphere</span>
+          <div className="flex items-center space-x-4 text-xs">
+            <button
+              type="button"
+              id="tab-empty-foryou"
+              onClick={() => {
+                setFeedMode('forYou');
+                fetchPosts(1, true, 'forYou');
+              }}
+              className={`font-semibold pb-1 transition-colors border-b-2 ${
+                feedMode === 'forYou' ? 'text-white border-white' : 'text-zinc-500 border-transparent hover:text-zinc-300'
+              }`}
+            >
+              For You
+            </button>
+            <button
+              type="button"
+              id="tab-empty-following"
+              onClick={() => {
+                setFeedMode('following');
+                fetchPosts(1, true, 'following');
+              }}
+              className={`font-semibold pb-1 transition-colors border-b-2 ${
+                feedMode === 'following' ? 'text-white border-white' : 'text-zinc-500 border-transparent hover:text-zinc-300'
+              }`}
+            >
+              Following
+            </button>
+          </div>
+        </div>
+
         <div className="w-16 h-16 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center mb-4 text-zinc-400">
           <Plus className="w-8 h-8" />
         </div>
-        <h2 className="text-xl font-bold text-white mb-2">No Posts Yet</h2>
+        <h2 className="text-xl font-bold text-white mb-2">
+          {feedMode === 'following' ? 'No Following Posts Yet' : 'No Posts Yet'}
+        </h2>
         <p className="text-xs text-zinc-400 max-w-xs mb-6 leading-relaxed">
-          The Sphere feed is empty. Be the pioneer creator by publishing the very first image with soundtrack tags.
+          {feedMode === 'following'
+            ? 'Follow your favorite creators by tapping the follow icon on their profile or in the For You feed to see their posts here.'
+            : 'The Sphere feed is empty. Be the pioneer creator by publishing the very first image with soundtrack tags.'}
         </p>
         <button
           id="btn-empty-feed-create"
-          onClick={onOpenCreate}
+          onClick={feedMode === 'following' ? () => { setFeedMode('forYou'); fetchPosts(1, true, 'forYou'); } : onOpenCreate}
           className="px-6 py-3 rounded-xl bg-white text-black font-semibold text-xs tracking-wide hover:bg-zinc-200 active:scale-95 transition-all"
         >
-          Create First Post
+          {feedMode === 'following' ? 'Explore For You Feed' : 'Create First Post'}
         </button>
       </div>
     );
@@ -219,9 +268,43 @@ export const FeedView: React.FC<FeedViewProps> = ({ onOpenCreate, onSelectCreato
             <div className="absolute inset-x-0 top-0 h-20 bg-gradient-to-b from-black/60 to-transparent pointer-events-none" />
           </div>
 
-          {/* Top Brand Marker */}
+          {/* Top Brand Marker & Feed Mode Switcher */}
           <div className="relative z-10 p-4 flex items-center justify-between text-xs">
-            <span className="font-bold tracking-wider text-sm drop-shadow-md">Sphere</span>
+            <div className="flex items-center space-x-4">
+              <span className="font-bold tracking-wider text-sm drop-shadow-md">Sphere</span>
+              <div className="flex items-center space-x-3 text-xs bg-black/40 backdrop-blur-md px-2.5 py-1 rounded-full border border-white/10">
+                <button
+                  type="button"
+                  id="tab-feed-foryou"
+                  onClick={() => {
+                    if (feedMode !== 'forYou') {
+                      setFeedMode('forYou');
+                      fetchPosts(1, true, 'forYou');
+                    }
+                  }}
+                  className={`font-semibold transition-colors pb-0.5 border-b-2 ${
+                    feedMode === 'forYou' ? 'text-white border-white' : 'text-zinc-400 border-transparent hover:text-zinc-200'
+                  }`}
+                >
+                  For You
+                </button>
+                <button
+                  type="button"
+                  id="tab-feed-following"
+                  onClick={() => {
+                    if (feedMode !== 'following') {
+                      setFeedMode('following');
+                      fetchPosts(1, true, 'following');
+                    }
+                  }}
+                  className={`font-semibold transition-colors pb-0.5 border-b-2 ${
+                    feedMode === 'following' ? 'text-white border-white' : 'text-zinc-400 border-transparent hover:text-zinc-200'
+                  }`}
+                >
+                  Following
+                </button>
+              </div>
+            </div>
             {toastNotice && (
               <div className="px-3 py-1 rounded-full bg-black/80 border border-zinc-700 text-white text-[11px] shadow-lg animate-fade-in">
                 {toastNotice}
@@ -311,6 +394,24 @@ export const FeedView: React.FC<FeedViewProps> = ({ onOpenCreate, onSelectCreato
                 {copiedPostId === post.id ? 'Copied' : 'Share'}
               </span>
             </div>
+
+            {/* Delete Post Button (Owner only) */}
+            {user && user.id === post.userId && (
+              <div className="flex flex-col items-center">
+                <button
+                  id={`btn-delete-post-${post.id}`}
+                  onClick={() => handleDeletePost(post.id)}
+                  aria-label="Delete post"
+                  title="Delete post"
+                  className="w-10 h-10 rounded-full flex items-center justify-center active:scale-110 transition-transform text-zinc-400 hover:text-red-400"
+                >
+                  <Trash2 className="w-5 h-5 drop-shadow-md" strokeWidth={2} />
+                </button>
+                <span className="text-[10px] text-zinc-400 mt-0.5 drop-shadow">
+                  Delete
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Bottom Overlay: Creator info, Caption, and Song Tag */}
@@ -392,6 +493,13 @@ export const FeedView: React.FC<FeedViewProps> = ({ onOpenCreate, onSelectCreato
             setPosts((prev) =>
               prev.map((p) =>
                 p.id === activeCommentsPostId ? { ...p, commentsCount: p.commentsCount + 1 } : p
+              )
+            );
+          }}
+          onCommentRemoved={() => {
+            setPosts((prev) =>
+              prev.map((p) =>
+                p.id === activeCommentsPostId ? { ...p, commentsCount: Math.max(0, p.commentsCount - 1) } : p
               )
             );
           }}

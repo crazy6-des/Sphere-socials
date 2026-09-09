@@ -138,6 +138,8 @@ CREATE TABLE IF NOT EXISTS user_settings (
   private_profile INTEGER DEFAULT 0,
   notifications_enabled INTEGER DEFAULT 1,
   data_saver INTEGER DEFAULT 0,
+  theme TEXT DEFAULT 'dark',
+  accent_color TEXT DEFAULT 'indigo',
   updated_at INTEGER NOT NULL,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
@@ -163,6 +165,9 @@ export async function initializeDatabase(db: DatabaseAdapter): Promise<void> {
   if (schemaInitialized) return;
   try {
     await db.exec(SCHEMA_SQL);
+    // Safe column migrations for existing tables
+    try { await db.exec("ALTER TABLE user_settings ADD COLUMN theme TEXT DEFAULT 'dark'"); } catch {}
+    try { await db.exec("ALTER TABLE user_settings ADD COLUMN accent_color TEXT DEFAULT 'indigo'"); } catch {}
     schemaInitialized = true;
     console.log('[Sphere DB] Schema initialized successfully.');
 
