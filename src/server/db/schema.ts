@@ -1,7 +1,6 @@
 import { DatabaseAdapter } from './adapter';
 
 export const SCHEMA_SQL = `
--- Users table
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   username TEXT UNIQUE NOT NULL,
@@ -14,7 +13,6 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at INTEGER NOT NULL
 );
 
--- Posts table (image only - strictly no video)
 CREATE TABLE IF NOT EXISTS posts (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -32,7 +30,6 @@ CREATE TABLE IF NOT EXISTS posts (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- Likes table
 CREATE TABLE IF NOT EXISTS likes (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -43,7 +40,16 @@ CREATE TABLE IF NOT EXISTS likes (
   FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
 );
 
--- Comments table
+CREATE TABLE IF NOT EXISTS saved_posts (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  post_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE(user_id, post_id),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS comments (
   id TEXT PRIMARY KEY,
   post_id TEXT NOT NULL,
@@ -54,7 +60,6 @@ CREATE TABLE IF NOT EXISTS comments (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- Follows table
 CREATE TABLE IF NOT EXISTS follows (
   id TEXT PRIMARY KEY,
   follower_id TEXT NOT NULL,
@@ -65,7 +70,6 @@ CREATE TABLE IF NOT EXISTS follows (
   FOREIGN KEY (following_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- Wallets table
 CREATE TABLE IF NOT EXISTS wallets (
   id TEXT PRIMARY KEY,
   user_id TEXT UNIQUE NOT NULL,
@@ -76,7 +80,6 @@ CREATE TABLE IF NOT EXISTS wallets (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- Transactions table
 CREATE TABLE IF NOT EXISTS transactions (
   id TEXT PRIMARY KEY,
   wallet_id TEXT NOT NULL,
@@ -92,7 +95,6 @@ CREATE TABLE IF NOT EXISTS transactions (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- Withdrawals table
 CREATE TABLE IF NOT EXISTS withdrawals (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -104,7 +106,6 @@ CREATE TABLE IF NOT EXISTS withdrawals (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- Sessions table for persistent server-managed session management & revocation
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -120,7 +121,6 @@ CREATE TABLE IF NOT EXISTS sessions (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- Password Resets table for persistent, single-use, timed reset tokens
 CREATE TABLE IF NOT EXISTS password_resets (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -131,7 +131,6 @@ CREATE TABLE IF NOT EXISTS password_resets (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- User Settings table for persistent user preferences and alignment
 CREATE TABLE IF NOT EXISTS user_settings (
   user_id TEXT PRIMARY KEY,
   autoplay_audio INTEGER DEFAULT 1,
@@ -144,11 +143,12 @@ CREATE TABLE IF NOT EXISTS user_settings (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- Query optimization indexes
 CREATE INDEX IF NOT EXISTS idx_posts_user ON posts(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_likes_post ON likes(post_id);
 CREATE INDEX IF NOT EXISTS idx_likes_user_post ON likes(user_id, post_id);
+CREATE INDEX IF NOT EXISTS idx_saved_posts_user ON saved_posts(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_saved_posts_post ON saved_posts(post_id);
 CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows(follower_id);
 CREATE INDEX IF NOT EXISTS idx_follows_following ON follows(following_id);
@@ -165,71 +165,12 @@ export async function initializeDatabase(db: DatabaseAdapter): Promise<void> {
   if (schemaInitialized) return;
   try {
     await db.exec(SCHEMA_SQL);
-    // Safe column migrations for existing tables
     try { await db.exec("ALTER TABLE user_settings ADD COLUMN theme TEXT DEFAULT 'dark'"); } catch {}
     try { await db.exec("ALTER TABLE user_settings ADD COLUMN accent_color TEXT DEFAULT 'indigo'"); } catch {}
     schemaInitialized = true;
     console.log('[Sphere DB] Schema initialized successfully.');
-
-    // Seed default admin and user account if table is empty
-    try {
-      const adminExists = await db
-        .prepare('SELECT id FROM users WHERE username = ? OR email = ?')
-        .bind('sphere_admin', '1234ymarmu@gmail.com')
-        .first();
-
-      if (!adminExists) {
-        const adminId = 'usr_admin_default_01';
-        const now = Date.now();
-        const defaultHash = 'bb75729bad5be1e55cbc7290c3abba76:836e88aa6b503229a6b3ab49064db5e69c1404205f7ac155b3f860f52ed9e75b'; // Password123!
-        await db
-          .prepare(
-            'INSERT OR IGNORE INTO users (id, username, email, password_hash, display_name, bio, avatar_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-          )
-          .bind(
-            adminId,
-            'sphere_admin',
-            '1234ymarmu@gmail.com',
-            defaultHash,
-            'Sphere Admin',
-            'Creator of Sphere Social Platform',
-            'https://api.dicebear.com/7.x/identicon/svg?seed=sphere_admin',
-            now,
-            now
-          )
-          .run();
-
-        // Seed wallet with starting funds
-        await db
-          .prepare('INSERT OR IGNORE INTO wallets (id, user_id, balance, total_earned, total_withdrawn, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
-          .bind('wal_admin_default_01', adminId, 150.00, 150.00, 0.00, now)
-          .run();
-
-        // Seed welcome post with music
-        const postId = 'pst_welcome_01';
-        await db
-          .prepare(
-            'INSERT OR IGNORE INTO posts (id, user_id, image_url, caption, song_title, song_artist, song_artwork_url, song_preview_url, likes_count, comments_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-          )
-          .bind(
-            postId,
-            adminId,
-            'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=1200&auto=format&fit=crop',
-            'Welcome to Sphere Social! Express yourself through photography, curated soundtrack pairings, and community rewards.',
-            'Midnight City',
-            'M83',
-            'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?q=80&w=300&auto=format&fit=crop',
-            'https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3?filename=lofi-study-112191.mp3',
-            12,
-            3,
-            now
-          )
-          .run();
-      }
-    } catch (seedErr: any) {
-      console.warn('[Sphere DB Seed Notice]:', seedErr.message);
-    }
   } catch (error: any) {
     console.error('[Sphere DB] Schema initialization error:', error.message);
+    throw error;
   }
 }
