@@ -26,6 +26,31 @@ jobs:
       - name: Install Wrangler
         run: npm install --global wrangler@4
 
+      - name: Align Cloudflare workers.dev subdomain with canonical architecture
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 6fe0a69a604d3b4214eee512955eb35e
+          CANONICAL_WORKERS_SUBDOMAIN: binancecompany274
+        run: |
+          set -euo pipefail
+          CURRENT_SUBDOMAIN="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/subdomain" \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);if(!j.success||!j.result?.subdomain)process.exit(1);process.stdout.write(j.result.subdomain)})')"
+          echo "Current workers.dev subdomain: ${CURRENT_SUBDOMAIN}"
+          if [ "${CURRENT_SUBDOMAIN}" != "${CANONICAL_WORKERS_SUBDOMAIN}" ]; then
+            echo "Restoring canonical workers.dev subdomain: ${CANONICAL_WORKERS_SUBDOMAIN}"
+            curl --fail --silent --show-error \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              -H 'Content-Type: application/json' \
+              -X PUT \
+              --data "{\"subdomain\":\"${CANONICAL_WORKERS_SUBDOMAIN}\"}" \
+              "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/subdomain" \
+              | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);if(!j.success||j.result?.subdomain!==process.env.CANONICAL_WORKERS_SUBDOMAIN)process.exit(1);console.log("Canonical workers.dev subdomain restored.")})'
+          else
+            echo "Canonical workers.dev subdomain already active."
+          fi
+
       - name: Deploy Sphere Worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
