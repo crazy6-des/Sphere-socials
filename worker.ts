@@ -23,6 +23,25 @@ export interface Env {
   BREVO_SENDER_EMAIL?: string;
 }
 
+function workerCorsHeaders(request: Request): Record<string, string> {
+  const origin = request.headers.get('Origin') || request.headers.get('origin') || '';
+  const allowed = !origin || origin === 'null' || /^https:\/\/([a-z0-9-]+\.)*netlify\.app$/i.test(origin) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+  return {
+    'Access-Control-Allow-Origin': allowed && origin && origin !== 'null' ? origin : '*',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
+    'Access-Control-Allow-Credentials': 'true',
+    'Vary': 'Origin',
+  };
+}
+
+function workerErrorResponse(request: Request, error: string, status: number): Response {
+  return new Response(JSON.stringify({ success: false, error }), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...workerCorsHeaders(request) },
+  });
+}
+
 async function guardLoginRequest(request: Request, env: Env): Promise<Response | null> {
   if (request.method.toUpperCase() !== 'POST') return null;
   const url = new URL(request.url);
@@ -36,24 +55,15 @@ async function guardLoginRequest(request: Request, env: Env): Promise<Response |
   if (!identifier || !password) return null;
 
   if (password === 'Password123!' || password === 'SphereUpdated2026!Secure') {
-    return new Response(JSON.stringify({ success: false, error: 'Invalid username/email or password.' }), {
-      status: 401,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return workerErrorResponse(request, 'Invalid username/email or password.', 401);
   }
   if (!env?.DB || typeof env.DB.prepare !== 'function') {
-    return new Response(JSON.stringify({ success: false, error: 'Authentication service is unavailable.' }), {
-      status: 503,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return workerErrorResponse(request, 'Authentication service is unavailable.', 503);
   }
 
   const row = await env.DB.prepare('SELECT id FROM users WHERE username = ? OR email = ?').bind(identifier, identifier).first();
   if (!row) {
-    return new Response(JSON.stringify({ success: false, error: 'Invalid username/email or password.' }), {
-      status: 401,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return workerErrorResponse(request, 'Invalid username/email or password.', 401);
   }
   return null;
 }
@@ -68,10 +78,7 @@ async function guardSessionBoundary(request: Request, env: Env, secret: string):
 
   const actorId = await authenticateSocialRequest(request, env.DB, secret).catch(() => null);
   if (actorId) return null;
-  return new Response(JSON.stringify({ success: false, error: 'Invalid, expired, or revoked authentication session.' }), {
-    status: 401,
-    headers: { 'Content-Type': 'application/json' },
-  });
+  return workerErrorResponse(request, 'Invalid, expired, or revoked authentication session.', 401);
 }
 
 function jwtSecret(env: Env): string {
@@ -149,15 +156,18 @@ async function persistActionNotification(context: any, response: Response, reque
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    // Answer browser CORS preflight before auth/configuration checks. This prevents
+    // configuration errors from being masked as a generic fetch/network failure.
+    if (request.method.toUpperCase() === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: workerCorsHeaders(request) });
+    }
+
     const loginGuardResponse = await guardLoginRequest(request, env);
     if (loginGuardResponse) return loginGuardResponse;
 
     const secret = jwtSecret(env);
     if (!secret) {
-      return new Response(JSON.stringify({ success: false, error: 'Authentication service is unavailable.' }), {
-        status: 503,
-        headers: { 'Content-Type': 'application/json' },
-      });
+      return workerErrorResponse(request, 'Authentication service is unavailable.', 503);
     }
 
     const requestUrl = new URL(request.url);
