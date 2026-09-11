@@ -31,26 +31,3 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 6fe0a69a604d3b4214eee512955eb35e
         run: wrangler deploy
-
-      - name: Smoke test canonical Worker endpoints
-        env:
-          CURRENT_API: https://sphere-api.1234ymarmu.workers.dev
-          HISTORICAL_API: https://sphere-api.binancecompany274.workers.dev
-        run: |
-          set -euo pipefail
-          probe() {
-            label="$1"
-            url="$2"
-            echo "=== ${label}: ${url}/api/health ==="
-            curl --silent --show-error --location --retry 2 --retry-delay 1 \
-              -H 'Origin: https://famous-alfajores-46f9fa.netlify.app' \
-              -D /tmp/headers -o /tmp/body -w 'HTTP %{http_code}\n' \
-              "${url}/api/health" || true
-            echo 'Content-Type:'
-            grep -i '^content-type:' /tmp/headers || true
-            echo 'Body:'
-            head -c 500 /tmp/body || true
-            echo
-          }
-          probe 'CURRENT' "${CURRENT_API}"
-          probe 'HISTORICAL' "${HISTORICAL_API}"
