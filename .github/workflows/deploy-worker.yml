@@ -30,4 +30,32 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 7f66f064a00bf92d839e0b06e15b6420
-        run: wrangler deploy
+        run: |
+          set -euo pipefail
+          wrangler deploy 2>&1 | tee /tmp/sphere-deploy.log
+          WORKER_URL="$(grep -oE 'https://sphere-api\.[^[:space:]]+\.workers\.dev' /tmp/sphere-deploy.log | tail -1 || true)"
+          if [ -z "$WORKER_URL" ]; then
+            echo "Could not determine deployed Worker URL from Wrangler output."
+            exit 1
+          fi
+          echo "Deployed Worker: $WORKER_URL"
+          echo "WORKER_URL=$WORKER_URL" >> "$GITHUB_ENV"
+
+      - name: Verify public Worker and Netlify CORS
+        run: |
+          set -euo pipefail
+          echo "Checking $WORKER_URL/api/health"
+          curl --fail-with-body --silent --show-error --retry 3 --retry-delay 2 \
+            -H 'Origin: https://famous-alfajores-46f9fa.netlify.app' \
+            "$WORKER_URL/api/health"
+          echo
+          echo "Checking browser preflight"
+          curl --fail --silent --show-error --retry 3 --retry-delay 2 -D /tmp/preflight.headers -o /dev/null \
+            -X OPTIONS \
+            -H 'Origin: https://famous-alfajores-46f9fa.netlify.app' \
+            -H 'Access-Control-Request-Method: POST' \
+            -H 'Access-Control-Request-Headers: content-type,authorization' \
+            "$WORKER_URL/api/auth/login"
+          grep -qi '^access-control-allow-origin: https://famous-alfajores-46f9fa.netlify.app' /tmp/preflight.headers
+          grep -qi '^access-control-allow-credentials: true' /tmp/preflight.headers
+          echo "Public Worker + Netlify CORS verification passed."
