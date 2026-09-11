@@ -50,6 +50,21 @@ CREATE TABLE IF NOT EXISTS saved_posts (
   FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS notifications (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  post_id TEXT DEFAULT NULL,
+  comment_id TEXT DEFAULT NULL,
+  read INTEGER DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE,
+  FOREIGN KEY (comment_id) REFERENCES comments(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS comments (
   id TEXT PRIMARY KEY,
   post_id TEXT NOT NULL,
@@ -149,6 +164,8 @@ CREATE INDEX IF NOT EXISTS idx_likes_post ON likes(post_id);
 CREATE INDEX IF NOT EXISTS idx_likes_user_post ON likes(user_id, post_id);
 CREATE INDEX IF NOT EXISTS idx_saved_posts_user ON saved_posts(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_saved_posts_post ON saved_posts(post_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, read, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows(follower_id);
 CREATE INDEX IF NOT EXISTS idx_follows_following ON follows(following_id);
