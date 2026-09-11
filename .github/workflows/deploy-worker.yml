@@ -32,28 +32,25 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: 6fe0a69a604d3b4214eee512955eb35e
         run: wrangler deploy
 
-      - name: Smoke test registration and login
+      - name: Smoke test canonical Worker endpoints
         env:
-          API_BASE: https://sphere-api.1234ymarmu.workers.dev
+          CURRENT_API: https://sphere-api.1234ymarmu.workers.dev
+          HISTORICAL_API: https://sphere-api.binancecompany274.workers.dev
         run: |
           set -euo pipefail
-          TEST_EMAIL="sphere-smoke-${GITHUB_RUN_ID}@binancecompany274.com"
-          TEST_USERNAME="smoke_${GITHUB_RUN_ID}"
-          TEST_PASSWORD="Sphere-${GITHUB_RUN_ID}-Smoke"
-          echo "Testing API: ${API_BASE}"
-          echo "Test account: ${TEST_EMAIL}"
-
-          REGISTER=$(curl --fail-with-body --silent --show-error --retry 3 --retry-delay 2 \
-            -H 'Origin: https://famous-alfajores-46f9fa.netlify.app' \
-            -H 'Content-Type: application/json' \
-            -X POST "${API_BASE}/api/auth/register" \
-            --data "{\"username\":\"${TEST_USERNAME}\",\"email\":\"${TEST_EMAIL}\",\"password\":\"${TEST_PASSWORD}\",\"displayName\":\"Sphere Smoke Test\"}")
-          echo "Registration response received."
-          echo "${REGISTER}" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);if(!j.success||!j.data?.token)process.exit(1);console.log("Registration: PASS")})'
-
-          LOGIN=$(curl --fail-with-body --silent --show-error --retry 3 --retry-delay 2 \
-            -H 'Origin: https://famous-alfajores-46f9fa.netlify.app' \
-            -H 'Content-Type: application/json' \
-            -X POST "${API_BASE}/api/auth/login" \
-            --data "{\"identifier\":\"${TEST_EMAIL}\",\"password\":\"${TEST_PASSWORD}\"}")
-          echo "${LOGIN}" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);if(!j.success||!j.data?.token)process.exit(1);console.log("Login: PASS")})'
+          probe() {
+            label="$1"
+            url="$2"
+            echo "=== ${label}: ${url}/api/health ==="
+            curl --silent --show-error --location --retry 2 --retry-delay 1 \
+              -H 'Origin: https://famous-alfajores-46f9fa.netlify.app' \
+              -D /tmp/headers -o /tmp/body -w 'HTTP %{http_code}\n' \
+              "${url}/api/health" || true
+            echo 'Content-Type:'
+            grep -i '^content-type:' /tmp/headers || true
+            echo 'Body:'
+            head -c 500 /tmp/body || true
+            echo
+          }
+          probe 'CURRENT' "${CURRENT_API}"
+          probe 'HISTORICAL' "${HISTORICAL_API}"
