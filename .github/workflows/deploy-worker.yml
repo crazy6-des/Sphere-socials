@@ -29,5 +29,5 @@ jobs:
       - name: Deploy Sphere Worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: 6fe0a69a604d3b4214eee512955eb35e
+          CLOUDFLARE_ACCOUNT_ID: 7f66f064a00bf92d839e0b06e15b6420
         run: wrangler deploy
