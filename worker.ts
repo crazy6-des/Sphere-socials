@@ -86,8 +86,38 @@ async function guardLoginRequest(request: Request, env: Env): Promise<Response |
   return null;
 }
 
+/**
+ * The legacy API historically accepted a structurally valid JWT even when
+ * its persistent session row was gone. The Worker is the real production
+ * boundary, so reject bearer tokens that cannot be tied to a live session.
+ */
+async function guardSessionBoundary(request: Request, env: Env, secret: string): Promise<Response | null> {
+  const authHeader = request.headers.get('Authorization') || request.headers.get('authorization');
+  if (!authHeader?.startsWith('Bearer ')) return null;
+
+  const url = new URL(request.url);
+  let path = url.pathname;
+  if (path.startsWith('/.netlify/functions/api')) {
+    path = path.replace('/.netlify/functions/api', '/api');
+  }
+
+  // Auth endpoints have their own token/session handling.
+  if (path.startsWith('/api/auth/')) return null;
+
+  const actorId = await authenticateSocialRequest(request, env.DB, secret).catch(() => null);
+  if (actorId) return null;
+
+  return new Response(JSON.stringify({
+    success: false,
+    error: 'Invalid, expired, or revoked authentication session.',
+  }), {
+    status: 401,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
 function jwtSecret(env: Env): string {
-  return env?.JWT_SECRET || (typeof process !== 'undefined' ? process.env?.JWT_SECRET : '') || 'sphere-jwt-secret-min-32-chars-key!';
+  return env?.JWT_SECRET || (typeof process !== 'undefined' ? process.env?.JWT_SECRET : '') || '';
 }
 
 async function captureNotificationContext(request: Request, env: Env, actorId: string | null): Promise<any> {
@@ -142,21 +172,40 @@ export default {
     if (loginGuardResponse) return loginGuardResponse;
 
     const secret = jwtSecret(env);
-    const url = new URL(request.url);
+    if (!secret) {
+      return new Response(JSON.stringify({ success: false, error: 'Authentication service is unavailable.' }), {
+        status: 503,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    // Backward-compatible media alias for the existing frontend preview/builds.
+    // The canonical storage route remains /api/storage/:key.
+    const requestUrl = new URL(request.url);
+    let routedRequest = request;
+    if (requestUrl.pathname.startsWith('/media/')) {
+      requestUrl.pathname = `/api/storage/${requestUrl.pathname.slice('/media/'.length)}`;
+      routedRequest = new Request(requestUrl.toString(), request);
+    }
+
+    const sessionGuardResponse = await guardSessionBoundary(routedRequest, env, secret);
+    if (sessionGuardResponse) return sessionGuardResponse;
+
+    const url = new URL(routedRequest.url);
     let path = url.pathname;
     if (path.startsWith('/.netlify/functions/api')) path = path.replace('/.netlify/functions/api', '/api');
     const extensionPath = path === '/api/notifications' || path === '/api/notifications/read-all' || /^\/api\/notifications\/[^/]+\/read$/.test(path) || path === '/api/saved-posts' || /^\/api\/posts\/[^/]+\/save$/.test(path);
 
     if (extensionPath && env?.DB && typeof env.DB.prepare === 'function') {
       await initializeDatabase(env.DB);
-      const extensionResponse = await handleSocialExtensionRequest(request, env.DB, secret);
+      const extensionResponse = await handleSocialExtensionRequest(routedRequest, env.DB, secret);
       if (extensionResponse) return extensionResponse;
     }
 
-    const actorId = await authenticateSocialRequest(request, env.DB, secret).catch(() => null);
-    const notificationContext = await captureNotificationContext(request, env, actorId);
-    const response = await handleServerlessRequest(request, env);
-    await persistActionNotification(notificationContext, response, request, env, actorId).catch((error) => {
+    const actorId = await authenticateSocialRequest(routedRequest, env.DB, secret).catch(() => null);
+    const notificationContext = await captureNotificationContext(routedRequest, env, actorId);
+    const response = await handleServerlessRequest(routedRequest, env);
+    await persistActionNotification(notificationContext, response, routedRequest, env, actorId).catch((error) => {
       console.warn('[Sphere Notifications] Could not persist notification:', error);
     });
     return response;
