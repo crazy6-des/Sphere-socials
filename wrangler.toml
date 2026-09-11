@@ -17,4 +17,3 @@ bucket_name = "sphere"
 
 [vars]
 ENVIRONMENT = "production"
-JWT_SECRET = "production_jwt_secret_configured_in_dashboard"
