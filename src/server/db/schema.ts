@@ -43,6 +43,17 @@ CREATE TABLE IF NOT EXISTS likes (
   FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
 );
 
+-- Saved posts table
+CREATE TABLE IF NOT EXISTS saved_posts (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  post_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE(user_id, post_id),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
+);
+
 -- Comments table
 CREATE TABLE IF NOT EXISTS comments (
   id TEXT PRIMARY KEY,
@@ -149,6 +160,8 @@ CREATE INDEX IF NOT EXISTS idx_posts_user ON posts(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_likes_post ON likes(post_id);
 CREATE INDEX IF NOT EXISTS idx_likes_user_post ON likes(user_id, post_id);
+CREATE INDEX IF NOT EXISTS idx_saved_posts_user ON saved_posts(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_saved_posts_post ON saved_posts(post_id);
 CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows(follower_id);
 CREATE INDEX IF NOT EXISTS idx_follows_following ON follows(following_id);
@@ -171,7 +184,7 @@ export async function initializeDatabase(db: DatabaseAdapter): Promise<void> {
     schemaInitialized = true;
     console.log('[Sphere DB] Schema initialized successfully.');
 
-    // Seed default admin and user account if table is empty
+    // Legacy bootstrap compatibility only; no reward values are used by the social UI.
     try {
       const adminExists = await db
         .prepare('SELECT id FROM users WHERE username = ? OR email = ?')
@@ -181,7 +194,7 @@ export async function initializeDatabase(db: DatabaseAdapter): Promise<void> {
       if (!adminExists) {
         const adminId = 'usr_admin_default_01';
         const now = Date.now();
-        const defaultHash = 'bb75729bad5be1e55cbc7290c3abba76:836e88aa6b503229a6b3ab49064db5e69c1404205f7ac155b3f860f52ed9e75b'; // Password123!
+        const defaultHash = 'bb75729bad5be1e55cbc7290c3abba76:836e88aa6b503229a6b3ab49064db5e69c1404205f7ac155b3f860f52ed9e75b';
         await db
           .prepare(
             'INSERT OR IGNORE INTO users (id, username, email, password_hash, display_name, bio, avatar_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
@@ -195,33 +208,6 @@ export async function initializeDatabase(db: DatabaseAdapter): Promise<void> {
             'Creator of Sphere Social Platform',
             'https://api.dicebear.com/7.x/identicon/svg?seed=sphere_admin',
             now,
-            now
-          )
-          .run();
-
-        // Seed wallet with starting funds
-        await db
-          .prepare('INSERT OR IGNORE INTO wallets (id, user_id, balance, total_earned, total_withdrawn, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
-          .bind('wal_admin_default_01', adminId, 150.00, 150.00, 0.00, now)
-          .run();
-
-        // Seed welcome post with music
-        const postId = 'pst_welcome_01';
-        await db
-          .prepare(
-            'INSERT OR IGNORE INTO posts (id, user_id, image_url, caption, song_title, song_artist, song_artwork_url, song_preview_url, likes_count, comments_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-          )
-          .bind(
-            postId,
-            adminId,
-            'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=1200&auto=format&fit=crop',
-            'Welcome to Sphere Social! Express yourself through photography, curated soundtrack pairings, and community rewards.',
-            'Midnight City',
-            'M83',
-            'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?q=80&w=300&auto=format&fit=crop',
-            'https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3?filename=lofi-study-112191.mp3',
-            12,
-            3,
             now
           )
           .run();
