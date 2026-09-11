@@ -7,8 +7,8 @@ import { initializeDatabase } from './src/server/db/schema';
 import { authenticateSocialRequest, createSocialNotification, handleSocialExtensionRequest } from './src/server/social-extensions';
 
 export interface Env {
-  DB: any; // Cloudflare D1 Binding
-  R2: any; // Cloudflare R2 Binding
+  DB: any;
+  R2: any;
   JWT_SECRET: string;
   JWT_REFRESH_SECRET?: string;
   R2_PUBLIC_URL?: string;
@@ -23,71 +23,88 @@ export interface Env {
   BREVO_SENDER_EMAIL?: string;
 }
 
-/**
- * The deployed Worker is the production API boundary. Keep the legacy API
- * implementation intact for now, but explicitly block its two unsafe login
- * fallbacks before the request reaches the route handler:
- *   1. a login for an identifier that does not already exist in D1
- *   2. the historical hard-coded master/reset passwords
- *
- * Registration remains the only supported path for creating an account.
- */
 async function guardLoginRequest(request: Request, env: Env): Promise<Response | null> {
   if (request.method.toUpperCase() !== 'POST') return null;
-
   const url = new URL(request.url);
   let path = url.pathname;
-  if (path.startsWith('/.netlify/functions/api')) {
-    path = path.replace('/.netlify/functions/api', '/api');
-  }
+  if (path.startsWith('/.netlify/functions/api')) path = path.replace('/.netlify/functions/api', '/api');
   if (path !== '/api/auth/login') return null;
 
   const body: any = await request.clone().json().catch(() => ({}));
   const identifier = typeof body?.identifier === 'string' ? body.identifier.toLowerCase().trim() : '';
   const password = typeof body?.password === 'string' ? body.password : '';
-
   if (!identifier || !password) return null;
 
   if (password === 'Password123!' || password === 'SphereUpdated2026!Secure') {
-    return new Response(JSON.stringify({
-      success: false,
-      error: 'Invalid username/email or password.',
-    }), {
+    return new Response(JSON.stringify({ success: false, error: 'Invalid username/email or password.' }), {
       status: 401,
       headers: { 'Content-Type': 'application/json' },
     });
   }
-
   if (!env?.DB || typeof env.DB.prepare !== 'function') {
-    return new Response(JSON.stringify({
-      success: false,
-      error: 'Authentication service is unavailable.',
-    }), {
+    return new Response(JSON.stringify({ success: false, error: 'Authentication service is unavailable.' }), {
       status: 503,
       headers: { 'Content-Type': 'application/json' },
     });
   }
 
-  const row = await env.DB
-    .prepare('SELECT id FROM users WHERE username = ? OR email = ?')
-    .bind(identifier, identifier)
-    .first();
-
+  const row = await env.DB.prepare('SELECT id FROM users WHERE username = ? OR email = ?').bind(identifier, identifier).first();
   if (!row) {
-    return new Response(JSON.stringify({
-      success: false,
-      error: 'Invalid username/email or password.',
-    }), {
+    return new Response(JSON.stringify({ success: false, error: 'Invalid username/email or password.' }), {
       status: 401,
       headers: { 'Content-Type': 'application/json' },
     });
   }
-
   return null;
 }
 
+async function guardSessionBoundary(request: Request, env: Env, secret: string): Promise<Response | null> {
+  const authHeader = request.headers.get('Authorization') || request.headers.get('authorization');
+  if (!authHeader?.startsWith('Bearer ')) return null;
+  const url = new URL(request.url);
+  let path = url.pathname;
+  if (path.startsWith('/.netlify/functions/api')) path = path.replace('/.netlify/functions/api', '/api');
+  if (path.startsWith('/api/auth/')) return null;
+
+  const actorId = await authenticateSocialRequest(request, env.DB, secret).catch(() => null);
+  if (actorId) return null;
+  return new Response(JSON.stringify({ success: false, error: 'Invalid, expired, or revoked authentication session.' }), {
+    status: 401,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
 function jwtSecret(env: Env): string {
-  return env?.JWT_SECRET || (typeof process !== 'undefined' ? process.env?.JWT_SECRET : '') || 'sphere-jwt-secret-min-32-chars-key!';
+  return env?.JWT_SECRET || (typeof process !== 'undefined' ? process.env?.JWT_SECRET : '') || '';
+}
+
+/** Keep the already-deployed frontend compatible with the canonical imageUrl API shape. */
+async function normalizePostMedia(response: Response, request: Request): Promise<Response> {
+  if (!response.ok || !(response.headers.get('content-type') || '').includes('application/json')) return response;
+  const url = new URL(request.url);
+  if (!url.pathname.endsWith('/posts') || !['GET', 'POST'].includes(request.method.toUpperCase())) return response;
+
+  const body: any = await response.clone().json().catch(() => null);
+  if (!body?.data) return response;
+  let changed = false;
+  if (Array.isArray(body.data.posts)) {
+    body.data.posts = body.data.posts.map((post: any) => {
+      if (post && !post.media && post.imageUrl) {
+        changed = true;
+        return { ...post, media: { url: post.imageUrl } };
+      }
+      return post;
+    });
+  }
+  if (body.data.post && !body.data.post.media && body.data.post.imageUrl) {
+    changed = true;
+    body.data.post = { ...body.data.post, media: { url: body.data.post.imageUrl } };
+  }
+  if (!changed) return response;
+
+  const headers = new Headers(response.headers);
+  headers.delete('content-length');
+  return new Response(JSON.stringify(body), { status: response.status, headers });
 }
 
 async function captureNotificationContext(request: Request, env: Env, actorId: string | null): Promise<any> {
@@ -114,21 +131,15 @@ async function captureNotificationContext(request: Request, env: Env, actorId: s
     const post: any = await env.DB.prepare('SELECT user_id FROM posts WHERE id = ?').bind(commentMatch[1]).first();
     return { type: 'comment', postId: commentMatch[1], targetUserId: post?.user_id || null };
   }
-
   return null;
 }
 
 async function persistActionNotification(context: any, response: Response, request: Request, env: Env, actorId: string | null): Promise<void> {
-  if (!context || !actorId || !response.ok) return;
-  if (context.wasExisting) return;
-
+  if (!context || !actorId || !response.ok || context.wasExisting) return;
   if (context.type === 'like' || context.type === 'follow') {
-    if (context.targetUserId) {
-      await createSocialNotification(env.DB, context.targetUserId, actorId, context.type, context.type === 'like' ? context.postId : undefined);
-    }
+    if (context.targetUserId) await createSocialNotification(env.DB, context.targetUserId, actorId, context.type, context.type === 'like' ? context.postId : undefined);
     return;
   }
-
   if (context.type === 'comment' && context.targetUserId) {
     const body: any = await response.clone().json().catch(() => null);
     const commentId = body?.data?.comment?.id || body?.data?.comment_id || body?.comment_id;
@@ -142,21 +153,39 @@ export default {
     if (loginGuardResponse) return loginGuardResponse;
 
     const secret = jwtSecret(env);
-    const url = new URL(request.url);
+    if (!secret) {
+      return new Response(JSON.stringify({ success: false, error: 'Authentication service is unavailable.' }), {
+        status: 503,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const requestUrl = new URL(request.url);
+    let routedRequest = request;
+    if (requestUrl.pathname.startsWith('/media/')) {
+      requestUrl.pathname = `/api/storage/${requestUrl.pathname.slice('/media/'.length)}`;
+      routedRequest = new Request(requestUrl.toString(), request);
+    }
+
+    const sessionGuardResponse = await guardSessionBoundary(routedRequest, env, secret);
+    if (sessionGuardResponse) return sessionGuardResponse;
+
+    const url = new URL(routedRequest.url);
     let path = url.pathname;
     if (path.startsWith('/.netlify/functions/api')) path = path.replace('/.netlify/functions/api', '/api');
     const extensionPath = path === '/api/notifications' || path === '/api/notifications/read-all' || /^\/api\/notifications\/[^/]+\/read$/.test(path) || path === '/api/saved-posts' || /^\/api\/posts\/[^/]+\/save$/.test(path);
 
     if (extensionPath && env?.DB && typeof env.DB.prepare === 'function') {
       await initializeDatabase(env.DB);
-      const extensionResponse = await handleSocialExtensionRequest(request, env.DB, secret);
+      const extensionResponse = await handleSocialExtensionRequest(routedRequest, env.DB, secret);
       if (extensionResponse) return extensionResponse;
     }
 
-    const actorId = await authenticateSocialRequest(request, env.DB, secret).catch(() => null);
-    const notificationContext = await captureNotificationContext(request, env, actorId);
-    const response = await handleServerlessRequest(request, env);
-    await persistActionNotification(notificationContext, response, request, env, actorId).catch((error) => {
+    const actorId = await authenticateSocialRequest(routedRequest, env.DB, secret).catch(() => null);
+    const notificationContext = await captureNotificationContext(routedRequest, env, actorId);
+    let response = await handleServerlessRequest(routedRequest, env);
+    response = await normalizePostMedia(response, routedRequest);
+    await persistActionNotification(notificationContext, response, routedRequest, env, actorId).catch((error) => {
       console.warn('[Sphere Notifications] Could not persist notification:', error);
     });
     return response;
