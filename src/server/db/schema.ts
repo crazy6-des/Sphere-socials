@@ -187,7 +187,6 @@ CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id, created_at ASC
 CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows(follower_id);
 CREATE INDEX IF NOT EXISTS idx_follows_following ON follows(following_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_user ON transactions(user_id, created_at DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_reference_unique ON transactions(reference_id) WHERE reference_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_reward_events_user ON reward_events(external_user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_reward_events_provider ON reward_events(provider, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
@@ -207,6 +206,7 @@ export async function initializeDatabase(db: DatabaseAdapter): Promise<void> {
     try { await db.exec("ALTER TABLE withdrawals ADD COLUMN reference_id TEXT DEFAULT NULL"); } catch {}
     try { await db.exec("ALTER TABLE withdrawals ADD COLUMN processed_at INTEGER DEFAULT NULL"); } catch {}
     try { await db.exec("ALTER TABLE withdrawals ADD COLUMN notes TEXT DEFAULT NULL"); } catch {}
+    try { await db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_reference_unique ON transactions(reference_id) WHERE reference_id IS NOT NULL"); } catch (error: any) { console.warn('[Sphere DB] Reference uniqueness index deferred:', error?.message || error); }
     schemaInitialized = true;
     console.log('[Sphere DB] Schema initialized successfully.');
   } catch (error: any) {
