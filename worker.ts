@@ -105,8 +105,13 @@ export default {
     if (env?.DB && typeof env.DB.prepare === 'function') {
       await initializeDatabase(env.DB);
       const db: any = { prepare: (sql: string) => env.DB.prepare(sql), exec: async (sql: string) => { await env.DB.exec(sql); }, batch: async (statements: any[]) => env.DB.batch(statements) };
-      const rewardsResponse = await handlePr2HardenedRequest(routedRequest, env, db);
-      if (rewardsResponse) return rewardsResponse;
+      const url = new URL(routedRequest.url); let path = url.pathname;
+      if (path.startsWith('/.netlify/functions/api')) path = path.replace('/.netlify/functions/api', '/api');
+      const isPr2Route = path === '/api/earn/providers' || path === '/api/wallet' || path === '/api/withdrawals' || path === '/api/earn/attention-reward' || path === '/api/earn/simulate-reward' || /^\/api\/earn\/postback\/(cpalead|cpagrip)$/.test(path);
+      if (isPr2Route) {
+        const rewardsResponse = await handlePr2HardenedRequest(routedRequest, env, db);
+        if (rewardsResponse) return rewardsResponse;
+      }
     }
 
     const url = new URL(routedRequest.url); let path = url.pathname;
