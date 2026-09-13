@@ -6,6 +6,7 @@ import { handleServerlessRequest } from './src/server/api';
 import { initializeDatabase } from './src/server/db/schema';
 import { authenticateSocialRequest, createSocialNotification, handleSocialExtensionRequest } from './src/server/social-extensions';
 import { handlePr2HardenedRequest } from './src/server/rewards/pr2Hardened';
+import { handleCpaleadRequest } from './src/server/rewards/cpalead';
 
 export interface Env {
   DB: any;
@@ -19,7 +20,9 @@ export interface Env {
   ESRNB_APP_ID?: string;
   ESRNB_API_KEY?: string;
   CPALEAD_PUBLISHER_ID?: string;
+  CPALEAD_API_KEY?: string;
   CPALEAD_POSTBACK_PASSWORD?: string;
+  CPALEAD_OFFERWALL_SLUG?: string;
   CPAGRIP_PUBLISHER_ID?: string;
   CPAGRIP_POSTBACK_SECRET?: string;
   CPAGRIP_POSTBACK_MODE?: string;
@@ -206,6 +209,8 @@ export default {
         exec: async (sql: string) => { await env.DB.exec(sql); },
         batch: async (statements: any[]) => env.DB.batch(statements),
       };
+      const cpaleadResponse = await handleCpaleadRequest(routedRequest, env, db);
+      if (cpaleadResponse) return cpaleadResponse;
       const isPr2Route = path === '/api/earn/providers' || path === '/api/wallet' || path === '/api/withdrawals' || path === '/api/earn/attention-reward' || path === '/api/earn/simulate-reward' || /^\/api\/earn\/postback\/(cpalead|cpagrip)$/.test(path) || path === '/api/cpal_postback';
       if (path === '/api/cpal_postback') {
         const rewritten = new URL(routedRequest.url);
