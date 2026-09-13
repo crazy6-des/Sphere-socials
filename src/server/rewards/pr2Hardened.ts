@@ -42,35 +42,23 @@ export function rewardProviderStatuses(env: any) {
 
 async function normalizeProvider(provider: RewardProviderId, payload: Record<string, any>, env: any): Promise<Conversion | null> {
   const explicitConversionId = clean(payload.lead_id || payload.transaction_id || payload.tx_id || payload.conversion_id || payload.event_id || payload.id, 160);
-  const externalUserId = provider === 'cpagrip'
-    ? clean(payload.tracking_id, 160)
-    : clean(payload.subid || payload.sub_id || payload.player_id || payload.user_id || payload.uid, 160);
+  const externalUserId = provider === 'cpagrip' ? clean(payload.tracking_id, 160) : clean(payload.subid || payload.sub_id || payload.player_id || payload.user_id || payload.uid, 160);
   const externalOfferId = clean(payload.campaign_id || payload.offer_id || payload.offerid || payload.offer, 160) || null;
   const payout = money(payload.payout ?? payload.amount ?? payload.reward);
   const state = clean(payload.status || payload.event).toLowerCase();
   const reversed = ['reversed', 'reverse', 'chargeback', 'cancelled', 'canceled'].includes(state) || clean(payload.reversal).toLowerCase() === 'true';
   if (!externalUserId || payout === null) return null;
-
   if (provider === 'cpalead') {
     if (!explicitConversionId) return null;
     const secret = envValue(env, 'CPALEAD_POSTBACK_PASSWORD');
     const supplied = clean(payload.password, 256);
     if (!secret || !supplied || !constantTimeEqual(supplied, secret)) return null;
   } else if (provider === 'cpagrip') {
-    const secret = envValue(env, 'CPAGRIP_POSTBACK_SECRET');
-    const mode = envValue(env, 'CPAGRIP_POSTBACK_MODE').toLowerCase();
-    if (!secret) return null;
-    if (mode === 'secret') {
-      const supplied = clean(payload.password, 256);
-      if (!supplied || !constantTimeEqual(supplied, secret)) return null;
-    } else if (mode === 'hmac-sha256-query') {
-      const supplied = clean(payload.signature || payload.sig, 256);
-      if (!supplied) return null;
-      const expected = await hmacSha256(secret, canonicalPayload(payload));
-      if (!constantTimeEqual(supplied.toLowerCase(), expected.toLowerCase())) return null;
-    } else return null;
+    const secret = envValue(env, 'CPAGRIP_POSTBACK_SECRET'); const mode = envValue(env, 'CPAGRIP_POSTBACK_MODE').toLowerCase(); if (!secret) return null;
+    if (mode === 'secret') { const supplied = clean(payload.password, 256); if (!supplied || !constantTimeEqual(supplied, secret)) return null; }
+    else if (mode === 'hmac-sha256-query') { const supplied = clean(payload.signature || payload.sig, 256); if (!supplied) return null; const expected = await hmacSha256(secret, canonicalPayload(payload)); if (!constantTimeEqual(supplied.toLowerCase(), expected.toLowerCase())) return null; }
+    else return null;
   } else return null;
-
   const externalConversionId = explicitConversionId || (provider === 'cpagrip' && !reversed ? `postback_${await sha256Hash(canonicalPayload(payload))}` : '');
   if (!externalConversionId) return null;
   return { provider, externalUserId, externalConversionId, externalOfferId, payout, currency: clean(payload.currency || payload.payout_currency || 'USD', 16).toUpperCase(), status: reversed ? 'reversed' : 'approved', occurredAt: Date.now(), rawPayloadHash: await sha256Hash(JSON.stringify(payload)) };
@@ -78,18 +66,15 @@ async function normalizeProvider(provider: RewardProviderId, payload: Record<str
 
 async function authenticateUser(request: Request, db: DatabaseAdapter, env: any): Promise<string | null> {
   const header = request.headers.get('Authorization') || ''; if (!header.startsWith('Bearer ')) return null; const token = header.slice(7).trim(); const secret = envValue(env, 'JWT_SECRET'); if (!token || !secret) return null;
-  try { const payload = await verifyJwt<{ userId: string }>(token, secret); if (!payload?.userId) return null; const hash = await sha256Hash(token); const session: any = await db.prepare('SELECT user_id, revoked, expires_at FROM sessions WHERE token_hash = ?').bind(hash).first(); if (!session || Number(session.revoked) === 1 || Number(session.expires_at) <= Date.now()) return null; return session.user_id === payload.userId ? session.userId : null; } catch { return null; }
+  try { const payload = await verifyJwt<{ userId: string }>(token, secret); if (!payload?.userId) return null; const hash = await sha256Hash(token); const session: any = await db.prepare('SELECT user_id, revoked, expires_at FROM sessions WHERE token_hash = ?').bind(hash).first(); if (!session || Number(session.revoked) === 1 || Number(session.expires_at) <= Date.now()) return null; return session.user_id === payload.userId ? session.user_id : null; } catch { return null; }
 }
 
 async function rewardCredit(db: DatabaseAdapter, conversion: Conversion, env: any): Promise<{ state: 'credited' | 'duplicate' | 'reversed' | 'rejected'; balance?: number; grossPayout?: number; userReward?: number; platformShare?: number }> {
   const user: any = await db.prepare('SELECT id FROM users WHERE id = ?').bind(conversion.externalUserId).first(); if (!user) return { state: 'rejected' };
   const wallet: any = await db.prepare('SELECT id, balance FROM wallets WHERE user_id = ?').bind(user.id).first(); if (!wallet || !db.batch) return { state: 'rejected' };
-  const userReward = rewardAmount(conversion.payout, env);
-  const platformShare = Math.round((conversion.payout - userReward) * 100) / 100;
-  if (userReward <= 0) return { state: 'rejected' };
+  const userReward = rewardAmount(conversion.payout, env); const platformShare = Math.round((conversion.payout - userReward) * 100) / 100; if (userReward <= 0) return { state: 'rejected' };
   if (conversion.status === 'approved') {
-    const existing: any = await db.prepare('SELECT id, status FROM reward_events WHERE provider = ? AND external_conversion_id = ?').bind(conversion.provider, conversion.externalConversionId).first();
-    if (existing?.status === 'credited' || existing?.status === 'reversed') return { state: 'duplicate' };
+    const existing: any = await db.prepare('SELECT id, status FROM reward_events WHERE provider = ? AND external_conversion_id = ?').bind(conversion.provider, conversion.externalConversionId).first(); if (existing?.status === 'credited' || existing?.status === 'reversed') return { state: 'duplicate' };
     if (!existing) { const reserve = await db.prepare('INSERT OR IGNORE INTO reward_events (id, provider, external_conversion_id, external_user_id, external_offer_id, payout, currency, status, raw_payload_hash, occurred_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(`rev_${generateId(14)}`, conversion.provider, conversion.externalConversionId, user.id, conversion.externalOfferId, conversion.payout, conversion.currency, 'pending', conversion.rawPayloadHash, conversion.occurredAt, Date.now()).run(); if (!reserve.success) return { state: 'rejected' }; if (reserve.meta?.changes !== 1) return { state: 'duplicate' }; }
     const txId = `txn_${generateId(14)}`; const reference = `reward:${conversion.provider}:${conversion.externalConversionId}`; const share = rewardSharePercent(env);
     const batch = await db.batch([
@@ -100,8 +85,7 @@ async function rewardCredit(db: DatabaseAdapter, conversion: Conversion, env: an
     if (!batch?.[0]?.meta?.changes) return { state: 'duplicate' }; const updated: any = await db.prepare('SELECT balance FROM wallets WHERE user_id = ?').bind(user.id).first(); return { state: 'credited', balance: Number(updated?.balance || 0), grossPayout: conversion.payout, userReward, platformShare };
   }
   const event: any = await db.prepare('SELECT id, status, payout FROM reward_events WHERE provider = ? AND external_conversion_id = ?').bind(conversion.provider, conversion.externalConversionId).first(); if (!event || event.status !== 'credited') return { state: 'rejected' };
-  const reversalReference = `reward-reversal:${conversion.provider}:${conversion.externalConversionId}`; const amount = rewardAmount(Number(event.payout || conversion.payout), env); if (!Number.isFinite(amount) || amount <= 0) return { state: 'rejected' };
-  if (Number(wallet.balance || 0) < amount) return { state: 'rejected' };
+  const reversalReference = `reward-reversal:${conversion.provider}:${conversion.externalConversionId}`; const amount = rewardAmount(Number(event.payout || conversion.payout), env); if (!Number.isFinite(amount) || amount <= 0 || Number(wallet.balance || 0) < amount) return { state: 'rejected' };
   const batch = await db.batch([
     db.prepare("INSERT INTO transactions (id, wallet_id, user_id, type, amount, status, provider, description, reference_id, created_at) SELECT ?, ?, ?, 'reward', ?, 'cancelled', ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM reward_events WHERE provider = ? AND external_conversion_id = ? AND status = 'credited') AND NOT EXISTS (SELECT 1 FROM transactions WHERE reference_id = ?)").bind(`txn_${generateId(14)}`, wallet.id, user.id, -amount, conversion.provider, `${conversion.provider} reward reversal`, reversalReference, Date.now(), conversion.provider, conversion.externalConversionId, reversalReference),
     db.prepare("UPDATE wallets SET balance = balance - ?, updated_at = ? WHERE user_id = ? AND balance >= ? AND EXISTS (SELECT 1 FROM transactions WHERE reference_id = ? AND status = 'cancelled') AND EXISTS (SELECT 1 FROM reward_events WHERE provider = ? AND external_conversion_id = ? AND status = 'credited')").bind(amount, Date.now(), user.id, amount, reversalReference, conversion.provider, conversion.externalConversionId),
@@ -114,17 +98,7 @@ async function walletResponse(request: Request, db: DatabaseAdapter, userId: str
 
 async function withdrawal(db: DatabaseAdapter, userId: string, amount: number, method: string, destination: string): Promise<{ ok: boolean; id?: string; balance?: number }> { if (!db.batch) return { ok: false }; const id = `wd_${generateId(14)}`; const now = Date.now(); const batch = await db.batch([db.prepare("INSERT INTO withdrawals (id, user_id, amount, payout_method, destination_account, status, created_at, reference_id) SELECT ?, ?, ?, ?, ?, 'pending', ?, ? WHERE NOT EXISTS (SELECT 1 FROM withdrawals WHERE user_id = ? AND status = 'pending') AND EXISTS (SELECT 1 FROM wallets WHERE user_id = ? AND balance >= ?)").bind(id, userId, amount, method, destination, now, `withdrawal:${id}`, userId, userId, amount), db.prepare("INSERT INTO transactions (id, wallet_id, user_id, type, amount, status, provider, description, reference_id, created_at) SELECT ?, w.id, ?, 'withdrawal', ?, 'pending', ?, 'Withdrawal request', ?, ? FROM wallets w WHERE w.user_id = ? AND EXISTS (SELECT 1 FROM withdrawals WHERE id = ? AND status = 'pending')").bind(`txn_${generateId(14)}`, userId, -amount, method, `withdrawal:${id}`, now, userId, id), db.prepare("UPDATE wallets SET balance = balance - ?, total_withdrawn = total_withdrawn + ?, updated_at = ? WHERE user_id = ? AND balance >= ? AND EXISTS (SELECT 1 FROM withdrawals WHERE id = ? AND status = 'pending')").bind(amount, amount, now, userId, amount, id)]); if (!batch?.[0]?.meta?.changes) return { ok: false }; const wallet: any = await db.prepare('SELECT balance FROM wallets WHERE user_id = ?').bind(userId).first(); return { ok: true, id, balance: Number(wallet?.balance || 0) }; }
 
-async function parseRewardPayload(request: Request, url: URL): Promise<Record<string, any>> {
-  if (request.method.toUpperCase() === 'GET') return Object.fromEntries(url.searchParams.entries());
-  const contentType = (request.headers.get('content-type') || '').toLowerCase();
-  if (contentType.includes('application/json')) return await request.json().catch(() => ({}));
-  if (contentType.includes('application/x-www-form-urlencoded')) return Object.fromEntries(new URLSearchParams(await request.text()).entries());
-  if (contentType.includes('multipart/form-data')) {
-    try { return Object.fromEntries((await request.formData()).entries()); } catch { return {}; }
-  }
-  const text = await request.text();
-  return Object.fromEntries(new URLSearchParams(text).entries());
-}
+async function parseRewardPayload(request: Request, url: URL): Promise<Record<string, any>> { if (request.method.toUpperCase() === 'GET') return Object.fromEntries(url.searchParams.entries()); const contentType = (request.headers.get('content-type') || '').toLowerCase(); if (contentType.includes('application/json')) return await request.json().catch(() => ({})); if (contentType.includes('application/x-www-form-urlencoded')) return Object.fromEntries(new URLSearchParams(await request.text()).entries()); if (contentType.includes('multipart/form-data')) { try { return Object.fromEntries((await request.formData()).entries()); } catch { return {}; } } const text = await request.text(); return Object.fromEntries(new URLSearchParams(text).entries()); }
 
 export async function handlePr2HardenedRequest(request: Request, env: any, db: DatabaseAdapter): Promise<Response | null> {
   const url = new URL(request.url); let path = url.pathname; if (path.startsWith('/.netlify/functions/api')) path = path.replace('/.netlify/functions/api', '/api'); const method = request.method.toUpperCase(); if (!path.startsWith('/api/earn') && path !== '/api/wallet' && path !== '/api/withdrawals') return null; if (method === 'OPTIONS') return json(request, { success: true }, 204);
