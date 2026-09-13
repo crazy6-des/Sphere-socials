@@ -2,12 +2,24 @@ import { handleServerlessRequest } from '../../src/server/api';
 
 /**
  * Netlify Functions v2 Entry Point for Sphere Social API
- * Handles all /api/* routes natively on Netlify.
- * If CLOUDFLARE_WORKER_URL is provided in environment variables, it proxies to the Worker.
- * Otherwise, it executes the authoritative serverless API handler with error isolation.
+ *
+ * The Cloudflare Worker is authoritative for the production API. Netlify is
+ * retained as a compatibility/fallback path for environments that do not have
+ * the Worker URL configured. Provider callbacks must never silently fall
+ * through to the SPA when the Worker proxy is unavailable.
  */
 export default async (req: Request) => {
   try {
+    const url = new URL(req.url);
+    let apiPath = url.pathname;
+    if (apiPath.startsWith('/.netlify/functions/api')) {
+      apiPath = apiPath.replace('/.netlify/functions/api', '/api');
+    }
+
+    const isProviderCallback =
+      apiPath === '/api/cpal_postback' ||
+      /^\/api\/earn\/postback\/(cpalead|cpagrip)$/.test(apiPath);
+
     const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
     let bodyBuffer: ArrayBuffer | undefined = undefined;
     if (hasBody) {
@@ -17,16 +29,11 @@ export default async (req: Request) => {
     const workerUrl = process.env.CLOUDFLARE_WORKER_URL;
     if (workerUrl) {
       try {
-        const url = new URL(req.url);
-        let apiPath = url.pathname;
-        if (apiPath.startsWith('/.netlify/functions/api')) {
-          apiPath = apiPath.replace('/.netlify/functions/api', '/api');
-        }
         const target = `${workerUrl.replace(/\/$/, '')}${apiPath}${url.search}`;
         const proxyHeaders = new Headers(req.headers);
         proxyHeaders.set('host', new URL(workerUrl).host);
 
-        // Forward Cloudflare Access service tokens if configured
+        // Forward Cloudflare Access service tokens if configured.
         if (process.env.CF_ACCESS_CLIENT_ID && process.env.CF_ACCESS_CLIENT_SECRET) {
           proxyHeaders.set('CF-Access-Client-Id', process.env.CF_ACCESS_CLIENT_ID);
           proxyHeaders.set('CF-Access-Client-Secret', process.env.CF_ACCESS_CLIENT_SECRET);
@@ -45,12 +52,62 @@ export default async (req: Request) => {
         if (!isAccessRedirect && res.status < 500) {
           return res;
         }
+
+        if (isProviderCallback) {
+          return new Response(
+            JSON.stringify({
+              success: false,
+              error: 'Reward provider callback could not reach the Cloudflare Worker.',
+              origin: 'netlify-worker-proxy',
+            }),
+            {
+              status: 502,
+              headers: {
+                'Content-Type': 'application/json',
+                'Cache-Control': 'no-store',
+              },
+            }
+          );
+        }
       } catch (proxyErr: any) {
-        console.warn('[Netlify Worker Proxy Error, falling back to local handler]:', proxyErr.message);
+        console.warn('[Netlify Worker Proxy Error]:', proxyErr.message);
+        if (isProviderCallback) {
+          return new Response(
+            JSON.stringify({
+              success: false,
+              error: 'Reward provider callback could not reach the Cloudflare Worker.',
+              origin: 'netlify-worker-proxy',
+            }),
+            {
+              status: 502,
+              headers: {
+                'Content-Type': 'application/json',
+                'Cache-Control': 'no-store',
+              },
+            }
+          );
+        }
       }
+    } else if (isProviderCallback) {
+      // Never allow a callback to fall through to the SPA or another handler.
+      // A 5xx tells CPAlead/CPAGrip that delivery must be retried/fixed.
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: 'Reward provider callback is not connected to the Cloudflare Worker.',
+          origin: 'netlify-worker-proxy',
+        }),
+        {
+          status: 503,
+          headers: {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store',
+          },
+        }
+      );
     }
 
-    // Reconstruct request if body was buffered
+    // Reconstruct request if body was buffered.
     const finalReq = hasBody
       ? new Request(req.url, {
           method: req.method,
@@ -59,11 +116,10 @@ export default async (req: Request) => {
         })
       : req;
 
-    // Execute serverless API handler
+    // Execute the legacy/serverless API handler for non-provider routes.
     return await handleServerlessRequest(finalReq, process.env);
   } catch (fatalErr: any) {
     console.error('[Netlify Function Fatal Error]:', fatalErr);
-    // Never allow an uncaught exception to bubble out to Netlify (which generates a 502 Bad Gateway)
     return new Response(
       JSON.stringify({
         success: false,
