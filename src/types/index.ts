@@ -96,8 +96,10 @@ export interface Withdrawal {
   createdAt: number;
 }
 
+export type RewardProviderId = 'adgem' | 'offerwall' | 'esrnb' | 'cpalead' | 'cpagrip' | 'reserved_3' | 'reserved_4' | 'reserved_5';
+
 export interface RewardProviderStatus {
-  id: 'adgem' | 'offerwall' | 'esrnb';
+  id: RewardProviderId;
   name: string;
   tagline: string;
   description: string;
@@ -137,4 +139,3 @@ export interface SystemStatus {
   walletActive: boolean;
   timestamp: number;
 }
-
