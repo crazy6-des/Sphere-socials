@@ -61,3 +61,25 @@ jobs:
             grep -qi '^access-control-allow-credentials: true' /tmp/preflight.headers
           done
           echo "Public Worker + production frontend CORS verification passed."
+
+      - name: Verify production Netlify API proxy
+        run: |
+          set -euo pipefail
+          for FRONTEND in "https://spheres.com.ng" "https://sphereis.netlify.app"; do
+            echo "Checking $FRONTEND/api/health"
+            curl --fail-with-body --silent --show-error --retry 3 --retry-delay 2 \
+              -H "Origin: $FRONTEND" \
+              "$FRONTEND/api/health"
+            echo
+            echo "Checking $FRONTEND/api/earn/providers"
+            curl --fail-with-body --silent --show-error --retry 3 --retry-delay 2 \
+              -H "Origin: $FRONTEND" \
+              "$FRONTEND/api/earn/providers"
+            echo
+            echo "Checking CORS for $FRONTEND"
+            curl --fail --silent --show-error --retry 3 --retry-delay 2 -D /tmp/frontend.headers -o /dev/null \
+              -H "Origin: $FRONTEND" \
+              "$FRONTEND/api/earn/providers"
+            grep -qi "^access-control-allow-origin: $FRONTEND" /tmp/frontend.headers
+          done
+          echo "Production Netlify -> Cloudflare Worker API proxy verification passed."
