@@ -27,5 +27,8 @@ jobs:
       - name: Typecheck
         run: npm run lint
 
+      - name: Run CPAlead isolated handler test
+        run: npm run test:cpalead
+
       - name: Build Worker and server bundle
         run: npm run build
