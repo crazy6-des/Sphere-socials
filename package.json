@@ -10,7 +10,9 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test:cpalead": "tsx src/server/rewards/cpalead.integration.test.ts"
+    "test:cpalead": "tsx src/server/rewards/cpalead.integration.test.ts",
+    "test:cpagrip": "tsx src/server/rewards/cpagrip.integration.test.ts",
+    "test:rewards": "npm run test:cpalead && npm run test:cpagrip"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
