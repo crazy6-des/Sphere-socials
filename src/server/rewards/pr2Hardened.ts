@@ -113,40 +113,43 @@ async function rewardCredit(db: DatabaseAdapter, conversion: Conversion): Promis
   const user: any = await db.prepare('SELECT id FROM users WHERE id = ?').bind(conversion.externalUserId).first();
   if (!user) return { state: 'rejected' };
   const wallet: any = await db.prepare('SELECT id FROM wallets WHERE user_id = ?').bind(user.id).first();
-  if (!wallet) return { state: 'rejected' };
-  const event: any = await db.prepare('SELECT id, status, payout FROM reward_events WHERE provider = ? AND external_conversion_id = ?').bind(conversion.provider, conversion.externalConversionId).first();
+  if (!wallet || !db.batch) return { state: 'rejected' };
 
   if (conversion.status === 'approved') {
-    if (event?.status === 'credited' || event?.status === 'reversed') return { state: 'duplicate' };
-    if (!db.batch) return { state: 'rejected' };
+    const existing: any = await db.prepare('SELECT id, status FROM reward_events WHERE provider = ? AND external_conversion_id = ?').bind(conversion.provider, conversion.externalConversionId).first();
+    if (existing?.status === 'credited' || existing?.status === 'reversed') return { state: 'duplicate' };
 
-    if (!event) {
+    if (!existing) {
       const reserve = await db.prepare('INSERT OR IGNORE INTO reward_events (id, provider, external_conversion_id, external_user_id, external_offer_id, payout, currency, status, raw_payload_hash, occurred_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(`rev_${generateId(14)}`, conversion.provider, conversion.externalConversionId, user.id, conversion.externalOfferId, conversion.payout, conversion.currency, 'pending', conversion.rawPayloadHash, conversion.occurredAt, Date.now()).run();
       if (!reserve.success) return { state: 'rejected' };
-    } else if (event.status !== 'pending') return { state: 'duplicate' };
+      if (reserve.meta?.changes !== 1) return { state: 'duplicate' };
+    }
 
     const txId = `txn_${generateId(14)}`;
     const reference = `reward:${conversion.provider}:${conversion.externalConversionId}`;
-    await db.batch([
-      db.prepare('INSERT INTO transactions (id, wallet_id, user_id, type, amount, status, provider, description, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(txId, wallet.id, user.id, 'reward', conversion.payout, 'completed', conversion.provider, `${conversion.provider} reward`, reference, Date.now()),
-      db.prepare('UPDATE wallets SET balance = balance + ?, total_earned = total_earned + ?, updated_at = ? WHERE user_id = ?').bind(conversion.payout, conversion.payout, Date.now(), user.id),
+    const batch = await db.batch([
+      db.prepare("INSERT INTO transactions (id, wallet_id, user_id, type, amount, status, provider, description, reference_id, created_at) SELECT ?, ?, ?, 'reward', ?, 'completed', ?, ?, ?, ? FROM reward_events WHERE provider = ? AND external_conversion_id = ? AND status = 'pending'").bind(txId, wallet.id, user.id, conversion.payout, conversion.provider, `${conversion.provider} reward`, reference, Date.now(), conversion.provider, conversion.externalConversionId),
+      db.prepare("UPDATE wallets SET balance = balance + ?, total_earned = total_earned + ?, updated_at = ? WHERE user_id = ? AND EXISTS (SELECT 1 FROM reward_events WHERE provider = ? AND external_conversion_id = ? AND status = 'pending')").bind(conversion.payout, conversion.payout, Date.now(), user.id, conversion.provider, conversion.externalConversionId),
       db.prepare("UPDATE reward_events SET status = 'credited', transaction_id = ?, processed_at = ? WHERE provider = ? AND external_conversion_id = ? AND status = 'pending'").bind(txId, Date.now(), conversion.provider, conversion.externalConversionId),
     ]);
+    if (!batch?.[0]?.meta?.changes) return { state: 'duplicate' };
     const updated: any = await db.prepare('SELECT balance FROM wallets WHERE user_id = ?').bind(user.id).first();
     return { state: 'credited', balance: Number(updated?.balance || 0) };
   }
 
+  const event: any = await db.prepare('SELECT id, status, payout FROM reward_events WHERE provider = ? AND external_conversion_id = ?').bind(conversion.provider, conversion.externalConversionId).first();
   if (!event || event.status !== 'credited') return { state: 'rejected' };
   const reversalReference = `reward-reversal:${conversion.provider}:${conversion.externalConversionId}`;
   const existingReversal: any = await db.prepare('SELECT id FROM transactions WHERE reference_id = ?').bind(reversalReference).first();
   if (existingReversal) return { state: 'duplicate' };
   const amount = Number(event.payout || conversion.payout);
-  if (!db.batch || !Number.isFinite(amount) || amount <= 0) return { state: 'rejected' };
-  await db.batch([
-    db.prepare('INSERT INTO transactions (id, wallet_id, user_id, type, amount, status, provider, description, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(`txn_${generateId(14)}`, wallet.id, user.id, 'reward', -amount, 'cancelled', conversion.provider, `${conversion.provider} reward reversal`, reversalReference, Date.now()),
-    db.prepare('UPDATE wallets SET balance = balance - ?, updated_at = ? WHERE user_id = ?').bind(amount, Date.now(), user.id),
+  if (!Number.isFinite(amount) || amount <= 0) return { state: 'rejected' };
+  const batch = await db.batch([
+    db.prepare("INSERT INTO transactions (id, wallet_id, user_id, type, amount, status, provider, description, reference_id, created_at) SELECT ?, ?, ?, 'reward', ?, 'cancelled', ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM reward_events WHERE provider = ? AND external_conversion_id = ? AND status = 'credited') AND NOT EXISTS (SELECT 1 FROM transactions WHERE reference_id = ?)").bind(`txn_${generateId(14)}`, wallet.id, user.id, -amount, conversion.provider, `${conversion.provider} reward reversal`, reversalReference, Date.now(), conversion.provider, conversion.externalConversionId, reversalReference),
+    db.prepare("UPDATE wallets SET balance = balance - ?, updated_at = ? WHERE user_id = ? AND EXISTS (SELECT 1 FROM reward_events WHERE provider = ? AND external_conversion_id = ? AND status = 'credited') AND NOT EXISTS (SELECT 1 FROM transactions WHERE reference_id = ?)").bind(amount, Date.now(), user.id, conversion.provider, conversion.externalConversionId, reversalReference),
     db.prepare("UPDATE reward_events SET status = 'reversed', processed_at = ? WHERE provider = ? AND external_conversion_id = ? AND status = 'credited'").bind(Date.now(), conversion.provider, conversion.externalConversionId),
   ]);
+  if (!batch?.[0]?.meta?.changes) return { state: 'duplicate' };
   const updated: any = await db.prepare('SELECT balance FROM wallets WHERE user_id = ?').bind(user.id).first();
   return { state: 'reversed', balance: Number(updated?.balance || 0) };
 }
@@ -185,6 +188,8 @@ export async function handlePr2HardenedRequest(request: Request, env: any, db: D
   if (path.startsWith('/api/earn/postback/') && (method === 'GET' || method === 'POST')) {
     const provider = clean(path.split('/').pop()).toLowerCase() as RewardProviderId;
     if (!PROVIDERS.includes(provider) || provider.startsWith('reserved_')) return fail(request, 'Unknown reward provider.', 404);
+    const contentLength = Number(request.headers.get('content-length') || '0');
+    if (method === 'POST' && Number.isFinite(contentLength) && contentLength > 32_768) return fail(request, 'Reward callback payload is too large.', 413);
     const payload = method === 'GET' ? Object.fromEntries(url.searchParams.entries()) : await request.json().catch(() => ({}));
     const conversion = await normalizeProvider(provider, payload as Record<string, any>, env);
     if (!conversion) return fail(request, 'Invalid or unauthenticated reward callback.', 401);
@@ -218,9 +223,18 @@ export async function handlePr2HardenedRequest(request: Request, env: any, db: D
     if (!wallet) return fail(request, 'Wallet unavailable.', 500);
     const day = new Date(); day.setHours(0, 0, 0, 0);
     const reference = `attention:${userId}:${day.getTime()}`;
-    const result = await db.prepare('INSERT OR IGNORE INTO transactions (id, wallet_id, user_id, type, amount, status, provider, description, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(`txn_${generateId(14)}`, wallet.id, userId, 'reward', 0.15, 'completed', 'attention', 'Verified attention session', reference, Date.now()).run();
-    if (!result.success || result.meta.changes !== 1) return fail(request, 'Daily attention reward already credited.', 409);
-    await db.prepare('UPDATE wallets SET balance = balance + 0.15, total_earned = total_earned + 0.15, updated_at = ? WHERE user_id = ?').bind(Date.now(), userId).run();
+    if (!db.batch) return fail(request, 'Reward service unavailable.', 503);
+    const pending: any = await db.prepare('SELECT id, status FROM transactions WHERE reference_id = ?').bind(reference).first();
+    if (pending?.status === 'completed') return fail(request, 'Daily attention reward already credited.', 409);
+    if (!pending) {
+      const inserted = await db.prepare('INSERT OR IGNORE INTO transactions (id, wallet_id, user_id, type, amount, status, provider, description, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(`txn_${generateId(14)}`, wallet.id, userId, 'reward', 0.15, 'pending', 'attention', 'Verified attention session', reference, Date.now()).run();
+      if (!inserted.success) return fail(request, 'Reward service unavailable.', 503);
+    }
+    const batch = await db.batch([
+      db.prepare("UPDATE wallets SET balance = balance + 0.15, total_earned = total_earned + 0.15, updated_at = ? WHERE user_id = ? AND EXISTS (SELECT 1 FROM transactions WHERE reference_id = ? AND status = 'pending')").bind(Date.now(), userId, reference),
+      db.prepare("UPDATE transactions SET status = 'completed' WHERE reference_id = ? AND status = 'pending'").bind(reference),
+    ]);
+    if (!batch?.[0]?.meta?.changes) return fail(request, 'Daily attention reward already credited.', 409);
     const updated: any = await db.prepare('SELECT balance FROM wallets WHERE user_id = ?').bind(userId).first();
     return json(request, { success: true, data: { rewardAmount: 0.15, newBalance: Number(updated?.balance || 0), message: 'Attention session verified and credited.' } });
   }
@@ -232,10 +246,11 @@ export async function handlePr2HardenedRequest(request: Request, env: any, db: D
     const amount = money(body.amount);
     if (!['cpalead', 'cpagrip'].includes(provider) || amount === null) return fail(request, 'Invalid provider or reward amount.');
     const wallet: any = await db.prepare('SELECT id FROM wallets WHERE user_id = ?').bind(userId).first();
-    if (!wallet) return fail(request, 'Wallet unavailable.', 500);
+    if (!wallet || !db.batch) return fail(request, 'Wallet unavailable.', 500);
     const now = Date.now();
-    await db.batch?.([
-      db.prepare('INSERT INTO transactions (id, wallet_id, user_id, type, amount, status, provider, description, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(`txn_${generateId(14)}`, wallet.id, userId, 'reward', amount, 'completed', provider, 'Development reward simulation', `simulation:${provider}:${generateId(16)}`, now),
+    const simulationReference = `simulation:${provider}:${generateId(16)}`;
+    await db.batch([
+      db.prepare('INSERT INTO transactions (id, wallet_id, user_id, type, amount, status, provider, description, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(`txn_${generateId(14)}`, wallet.id, userId, 'reward', amount, 'completed', provider, 'Development reward simulation', simulationReference, now),
       db.prepare('UPDATE wallets SET balance = balance + ?, total_earned = total_earned + ?, updated_at = ? WHERE user_id = ?').bind(amount, amount, now, userId),
     ]);
     const updated: any = await db.prepare('SELECT balance FROM wallets WHERE user_id = ?').bind(userId).first();
