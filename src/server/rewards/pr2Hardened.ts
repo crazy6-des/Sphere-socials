@@ -39,15 +39,41 @@ export function rewardProviderStatuses(env: any) {
 }
 
 async function normalizeProvider(provider: RewardProviderId, payload: Record<string, any>, env: any): Promise<Conversion | null> {
-  const externalUserId = clean(payload.subid || payload.sub_id || payload.player_id || payload.user_id || payload.uid, 160);
-  const externalConversionId = clean(payload.lead_id || payload.transaction_id || payload.tx_id || payload.conversion_id || payload.event_id || payload.id, 160);
+  const explicitConversionId = clean(payload.lead_id || payload.transaction_id || payload.tx_id || payload.conversion_id || payload.event_id || payload.id, 160);
+  const externalUserId = provider === 'cpagrip'
+    ? clean(payload.tracking_id, 160)
+    : clean(payload.subid || payload.sub_id || payload.player_id || payload.user_id || payload.uid, 160);
   const externalOfferId = clean(payload.campaign_id || payload.offer_id || payload.offerid || payload.offer, 160) || null;
   const payout = money(payload.payout ?? payload.amount ?? payload.reward);
-  if (!externalUserId || !externalConversionId || payout === null) return null;
-  if (provider === 'cpalead') { const secret = envValue(env, 'CPALEAD_POSTBACK_PASSWORD'); const supplied = clean(payload.password, 256); if (!secret || !supplied || !constantTimeEqual(supplied, secret)) return null; }
-  else if (provider === 'cpagrip') { const secret = envValue(env, 'CPAGRIP_POSTBACK_SECRET'); const mode = envValue(env, 'CPAGRIP_POSTBACK_MODE').toLowerCase(); const supplied = clean(payload.signature || payload.sig || payload.password, 256); if (!secret || !supplied) return null; if (mode === 'secret') { if (!constantTimeEqual(supplied, secret)) return null; } else if (mode === 'hmac-sha256-query') { const expected = await hmacSha256(secret, canonicalPayload(payload)); if (!constantTimeEqual(supplied.toLowerCase(), expected.toLowerCase())) return null; } else return null; }
-  else return null;
-  const state = clean(payload.status || payload.event).toLowerCase(); const reversed = ['reversed', 'reverse', 'chargeback', 'cancelled', 'canceled'].includes(state) || clean(payload.reversal).toLowerCase() === 'true';
+  const state = clean(payload.status || payload.event).toLowerCase();
+  const reversed = ['reversed', 'reverse', 'chargeback', 'cancelled', 'canceled'].includes(state) || clean(payload.reversal).toLowerCase() === 'true';
+  if (!externalUserId || payout === null) return null;
+
+  if (provider === 'cpalead') {
+    if (!explicitConversionId) return null;
+    const secret = envValue(env, 'CPALEAD_POSTBACK_PASSWORD');
+    const supplied = clean(payload.password, 256);
+    if (!secret || !supplied || !constantTimeEqual(supplied, secret)) return null;
+  } else if (provider === 'cpagrip') {
+    const secret = envValue(env, 'CPAGRIP_POSTBACK_SECRET');
+    const mode = envValue(env, 'CPAGRIP_POSTBACK_MODE').toLowerCase();
+    if (!secret) return null;
+    if (mode === 'secret') {
+      const supplied = clean(payload.password, 256);
+      if (!supplied || !constantTimeEqual(supplied, secret)) return null;
+    } else if (mode === 'hmac-sha256-query') {
+      const supplied = clean(payload.signature || payload.sig, 256);
+      if (!supplied) return null;
+      const expected = await hmacSha256(secret, canonicalPayload(payload));
+      if (!constantTimeEqual(supplied.toLowerCase(), expected.toLowerCase())) return null;
+    } else return null;
+  } else return null;
+
+  // CPAGrip's dashboard contract shown to us does not expose a unique conversion ID.
+  // For approved callbacks only, fingerprint the authenticated payload so provider retries
+  // are idempotent. Reversal callbacks without a stable conversion ID are rejected safely.
+  const externalConversionId = explicitConversionId || (provider === 'cpagrip' && !reversed ? `postback_${await sha256Hash(canonicalPayload(payload))}` : '');
+  if (!externalConversionId) return null;
   return { provider, externalUserId, externalConversionId, externalOfferId, payout, currency: clean(payload.currency || payload.payout_currency || 'USD', 16).toUpperCase(), status: reversed ? 'reversed' : 'approved', occurredAt: Date.now(), rawPayloadHash: await sha256Hash(JSON.stringify(payload)) };
 }
 
@@ -85,10 +111,22 @@ async function walletResponse(request: Request, db: DatabaseAdapter, userId: str
 
 async function withdrawal(db: DatabaseAdapter, userId: string, amount: number, method: string, destination: string): Promise<{ ok: boolean; id?: string; balance?: number }> { if (!db.batch) return { ok: false }; const id = `wd_${generateId(14)}`; const now = Date.now(); const batch = await db.batch([db.prepare("INSERT INTO withdrawals (id, user_id, amount, payout_method, destination_account, status, created_at, reference_id) SELECT ?, ?, ?, ?, ?, 'pending', ?, ? WHERE NOT EXISTS (SELECT 1 FROM withdrawals WHERE user_id = ? AND status = 'pending') AND EXISTS (SELECT 1 FROM wallets WHERE user_id = ? AND balance >= ?)").bind(id, userId, amount, method, destination, now, `withdrawal:${id}`, userId, userId, amount), db.prepare("INSERT INTO transactions (id, wallet_id, user_id, type, amount, status, provider, description, reference_id, created_at) SELECT ?, w.id, ?, 'withdrawal', ?, 'pending', ?, 'Withdrawal request', ?, ? FROM wallets w WHERE w.user_id = ? AND EXISTS (SELECT 1 FROM withdrawals WHERE id = ? AND status = 'pending')").bind(`txn_${generateId(14)}`, userId, -amount, method, `withdrawal:${id}`, now, userId, id), db.prepare("UPDATE wallets SET balance = balance - ?, total_withdrawn = total_withdrawn + ?, updated_at = ? WHERE user_id = ? AND balance >= ? AND EXISTS (SELECT 1 FROM withdrawals WHERE id = ? AND status = 'pending')").bind(amount, amount, now, userId, amount, id)]); if (!batch?.[0]?.meta?.changes) return { ok: false }; const wallet: any = await db.prepare('SELECT balance FROM wallets WHERE user_id = ?').bind(userId).first(); return { ok: true, id, balance: Number(wallet?.balance || 0) }; }
 
+async function parseRewardPayload(request: Request, url: URL): Promise<Record<string, any>> {
+  if (request.method.toUpperCase() === 'GET') return Object.fromEntries(url.searchParams.entries());
+  const contentType = (request.headers.get('content-type') || '').toLowerCase();
+  if (contentType.includes('application/json')) return await request.json().catch(() => ({}));
+  if (contentType.includes('application/x-www-form-urlencoded')) return Object.fromEntries(new URLSearchParams(await request.text()).entries());
+  if (contentType.includes('multipart/form-data')) {
+    try { return Object.fromEntries((await request.formData()).entries()); } catch { return {}; }
+  }
+  const text = await request.text();
+  return Object.fromEntries(new URLSearchParams(text).entries());
+}
+
 export async function handlePr2HardenedRequest(request: Request, env: any, db: DatabaseAdapter): Promise<Response | null> {
   const url = new URL(request.url); let path = url.pathname; if (path.startsWith('/.netlify/functions/api')) path = path.replace('/.netlify/functions/api', '/api'); const method = request.method.toUpperCase(); if (!path.startsWith('/api/earn') && path !== '/api/wallet' && path !== '/api/withdrawals') return null; if (method === 'OPTIONS') return json(request, { success: true }, 204);
   if (path === '/api/earn/providers' && method === 'GET') return json(request, { success: true, data: { providers: rewardProviderStatuses(env) } });
-  if (path.startsWith('/api/earn/postback/') && (method === 'GET' || method === 'POST')) { const provider = clean(path.split('/').pop()).toLowerCase() as RewardProviderId; if (!PROVIDERS.includes(provider) || provider.startsWith('reserved_')) return fail(request, 'Unknown reward provider.', 404); const contentLength = Number(request.headers.get('content-length') || '0'); if (method === 'POST' && Number.isFinite(contentLength) && contentLength > 32_768) return fail(request, 'Reward callback payload is too large.', 413); const payload = method === 'GET' ? Object.fromEntries(url.searchParams.entries()) : await request.json().catch(() => ({})); const conversion = await normalizeProvider(provider, payload as Record<string, any>, env); if (!conversion) return fail(request, 'Invalid or unauthenticated reward callback.', 401); const result = await rewardCredit(db, conversion); if (result.state === 'duplicate') return json(request, { success: true, duplicate: true }); if (result.state === 'credited') return json(request, { success: true, credited: true, balance: result.balance }); if (result.state === 'reversed') return json(request, { success: true, reversed: true, balance: result.balance }); return fail(request, 'Reward callback could not be processed.', 409); }
+  if (path.startsWith('/api/earn/postback/') && (method === 'GET' || method === 'POST')) { const provider = clean(path.split('/').pop()).toLowerCase() as RewardProviderId; if (!PROVIDERS.includes(provider) || provider.startsWith('reserved_')) return fail(request, 'Unknown reward provider.', 404); const contentLength = Number(request.headers.get('content-length') || '0'); if (method === 'POST' && Number.isFinite(contentLength) && contentLength > 32_768) return fail(request, 'Reward callback payload is too large.', 413); const payload = await parseRewardPayload(request, url); const conversion = await normalizeProvider(provider, payload, env); if (!conversion) return fail(request, 'Invalid or unauthenticated reward callback.', 401); const result = await rewardCredit(db, conversion); if (result.state === 'duplicate') return json(request, { success: true, duplicate: true }); if (result.state === 'credited') return json(request, { success: true, credited: true, balance: result.balance }); if (result.state === 'reversed') return json(request, { success: true, reversed: true, balance: result.balance }); return fail(request, 'Reward callback could not be processed.', 409); }
   const userId = await authenticateUser(request, db, env); if (!userId) return fail(request, 'Authentication required.', 401);
   if (path === '/api/wallet' && method === 'GET') return walletResponse(request, db, userId);
   if (path === '/api/withdrawals' && method === 'POST') { const body: any = await request.json().catch(() => ({})); const amount = money(body.amount); const payoutMethod = clean(body.payoutMethod || body.payout_method).toLowerCase(); const destination = clean(body.destinationAccount || body.destination_account, 256); const minimum = money(envValue(env, 'MIN_WITHDRAWAL') || '5') || 5; if (amount === null || amount < minimum) return fail(request, `Minimum withdrawal is ${minimum}.`); if (!PAYOUT_METHODS.has(payoutMethod) || !destination) return fail(request, 'Valid payout method and destination account are required.'); const result = await withdrawal(db, userId, amount, payoutMethod, destination); if (!result.ok) return fail(request, 'Insufficient balance or an existing pending withdrawal.', 409); return json(request, { success: true, data: { withdrawalId: result.id, newBalance: result.balance } }); }
