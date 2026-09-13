@@ -1,5 +1,6 @@
 name: Deploy Sphere Worker
 
+# Production Worker deployment: trigger on every main push.
 on:
   push:
     branches:
