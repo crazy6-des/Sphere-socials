@@ -12,19 +12,169 @@ CREATE TABLE IF NOT EXISTS users (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS posts (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, image_url TEXT NOT NULL, caption TEXT DEFAULT '', song_title TEXT DEFAULT NULL, song_artist TEXT DEFAULT NULL, song_album TEXT DEFAULT NULL, song_artwork_url TEXT DEFAULT NULL, song_preview_url TEXT DEFAULT NULL, song_provider_id TEXT DEFAULT NULL, likes_count INTEGER DEFAULT 0, comments_count INTEGER DEFAULT 0, created_at INTEGER NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS likes (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, post_id TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(user_id, post_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS saved_posts (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, post_id TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(user_id, post_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS notifications (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, actor_id TEXT NOT NULL, type TEXT NOT NULL, post_id TEXT DEFAULT NULL, comment_id TEXT DEFAULT NULL, read INTEGER DEFAULT 0, created_at INTEGER NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE, FOREIGN KEY (comment_id) REFERENCES comments(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS comments (id TEXT PRIMARY KEY, post_id TEXT NOT NULL, user_id TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL, FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS follows (id TEXT PRIMARY KEY, follower_id TEXT NOT NULL, following_id TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(follower_id, following_id), FOREIGN KEY (follower_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (following_id) REFERENCES users(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS wallets (id TEXT PRIMARY KEY, user_id TEXT UNIQUE NOT NULL, balance REAL DEFAULT 0.00, total_earned REAL DEFAULT 0.00, total_withdrawn REAL DEFAULT 0.00, updated_at INTEGER NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS transactions (id TEXT PRIMARY KEY, wallet_id TEXT NOT NULL, user_id TEXT NOT NULL, type TEXT NOT NULL, amount REAL NOT NULL, status TEXT NOT NULL, provider TEXT, description TEXT NOT NULL, reference_id TEXT, created_at INTEGER NOT NULL, FOREIGN KEY (wallet_id) REFERENCES wallets(id) ON DELETE CASCADE, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS reward_events (id TEXT PRIMARY KEY, provider TEXT NOT NULL, external_conversion_id TEXT NOT NULL, external_user_id TEXT NOT NULL, external_offer_id TEXT DEFAULT NULL, payout REAL NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL, transaction_id TEXT DEFAULT NULL, raw_payload_hash TEXT DEFAULT NULL, occurred_at INTEGER NOT NULL, processed_at INTEGER DEFAULT NULL, created_at INTEGER NOT NULL, UNIQUE(provider, external_conversion_id));
-CREATE TABLE IF NOT EXISTS withdrawals (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, amount REAL NOT NULL, payout_method TEXT NOT NULL, destination_account TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, token_hash TEXT NOT NULL, refresh_token_hash TEXT NOT NULL, user_agent TEXT DEFAULT '', ip_address TEXT DEFAULT '', expires_at INTEGER NOT NULL, refresh_expires_at INTEGER NOT NULL, revoked INTEGER DEFAULT 0, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS password_resets (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, token_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, used INTEGER DEFAULT 0, created_at INTEGER NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS user_settings (user_id TEXT PRIMARY KEY, autoplay_audio INTEGER DEFAULT 1, private_profile INTEGER DEFAULT 0, notifications_enabled INTEGER DEFAULT 1, data_saver INTEGER DEFAULT 0, theme TEXT DEFAULT 'dark', accent_color TEXT DEFAULT 'indigo', updated_at INTEGER NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);
+
+CREATE TABLE IF NOT EXISTS posts (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  image_url TEXT NOT NULL,
+  caption TEXT DEFAULT '',
+  song_title TEXT DEFAULT NULL,
+  song_artist TEXT DEFAULT NULL,
+  song_album TEXT DEFAULT NULL,
+  song_artwork_url TEXT DEFAULT NULL,
+  song_preview_url TEXT DEFAULT NULL,
+  song_provider_id TEXT DEFAULT NULL,
+  likes_count INTEGER DEFAULT 0,
+  comments_count INTEGER DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS likes (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  post_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE(user_id, post_id),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS saved_posts (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  post_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE(user_id, post_id),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  post_id TEXT DEFAULT NULL,
+  comment_id TEXT DEFAULT NULL,
+  read INTEGER DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE,
+  FOREIGN KEY (comment_id) REFERENCES comments(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS comments (
+  id TEXT PRIMARY KEY,
+  post_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS follows (
+  id TEXT PRIMARY KEY,
+  follower_id TEXT NOT NULL,
+  following_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE(follower_id, following_id),
+  FOREIGN KEY (follower_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (following_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS wallets (
+  id TEXT PRIMARY KEY,
+  user_id TEXT UNIQUE NOT NULL,
+  balance REAL DEFAULT 0.00,
+  total_earned REAL DEFAULT 0.00,
+  total_withdrawn REAL DEFAULT 0.00,
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS transactions (
+  id TEXT PRIMARY KEY,
+  wallet_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  amount REAL NOT NULL,
+  status TEXT NOT NULL,
+  provider TEXT,
+  description TEXT NOT NULL,
+  reference_id TEXT,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (wallet_id) REFERENCES wallets(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS reward_events (
+  id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  external_conversion_id TEXT NOT NULL,
+  external_user_id TEXT NOT NULL,
+  external_offer_id TEXT DEFAULT NULL,
+  payout REAL NOT NULL,
+  currency TEXT NOT NULL,
+  status TEXT NOT NULL,
+  transaction_id TEXT DEFAULT NULL,
+  raw_payload_hash TEXT DEFAULT NULL,
+  occurred_at INTEGER NOT NULL,
+  processed_at INTEGER DEFAULT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE(provider, external_conversion_id)
+);
+
+CREATE TABLE IF NOT EXISTS withdrawals (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  amount REAL NOT NULL,
+  payout_method TEXT NOT NULL,
+  destination_account TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  token_hash TEXT NOT NULL,
+  refresh_token_hash TEXT NOT NULL,
+  user_agent TEXT DEFAULT '',
+  ip_address TEXT DEFAULT '',
+  expires_at INTEGER NOT NULL,
+  refresh_expires_at INTEGER NOT NULL,
+  revoked INTEGER DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  last_used_at INTEGER NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS password_resets (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  token_hash TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  used INTEGER DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS user_settings (
+  user_id TEXT PRIMARY KEY,
+  autoplay_audio INTEGER DEFAULT 1,
+  private_profile INTEGER DEFAULT 0,
+  notifications_enabled INTEGER DEFAULT 1,
+  data_saver INTEGER DEFAULT 0,
+  theme TEXT DEFAULT 'dark',
+  accent_color TEXT DEFAULT 'indigo',
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_posts_user ON posts(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_likes_post ON likes(post_id);
