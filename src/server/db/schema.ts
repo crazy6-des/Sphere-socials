@@ -110,6 +110,23 @@ CREATE TABLE IF NOT EXISTS transactions (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS reward_events (
+  id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  external_conversion_id TEXT NOT NULL,
+  external_user_id TEXT NOT NULL,
+  external_offer_id TEXT DEFAULT NULL,
+  payout REAL NOT NULL,
+  currency TEXT NOT NULL,
+  status TEXT NOT NULL,
+  transaction_id TEXT DEFAULT NULL,
+  raw_payload_hash TEXT DEFAULT NULL,
+  occurred_at INTEGER NOT NULL,
+  processed_at INTEGER DEFAULT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE(provider, external_conversion_id)
+);
+
 CREATE TABLE IF NOT EXISTS withdrawals (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -170,6 +187,9 @@ CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id, created_at ASC
 CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows(follower_id);
 CREATE INDEX IF NOT EXISTS idx_follows_following ON follows(following_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_user ON transactions(user_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_reference_unique ON transactions(reference_id) WHERE reference_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_reward_events_user ON reward_events(external_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_reward_events_provider ON reward_events(provider, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash);
 CREATE INDEX IF NOT EXISTS idx_sessions_refresh ON sessions(refresh_token_hash);
@@ -184,6 +204,9 @@ export async function initializeDatabase(db: DatabaseAdapter): Promise<void> {
     await db.exec(SCHEMA_SQL);
     try { await db.exec("ALTER TABLE user_settings ADD COLUMN theme TEXT DEFAULT 'dark'"); } catch {}
     try { await db.exec("ALTER TABLE user_settings ADD COLUMN accent_color TEXT DEFAULT 'indigo'"); } catch {}
+    try { await db.exec("ALTER TABLE withdrawals ADD COLUMN reference_id TEXT DEFAULT NULL"); } catch {}
+    try { await db.exec("ALTER TABLE withdrawals ADD COLUMN processed_at INTEGER DEFAULT NULL"); } catch {}
+    try { await db.exec("ALTER TABLE withdrawals ADD COLUMN notes TEXT DEFAULT NULL"); } catch {}
     schemaInitialized = true;
     console.log('[Sphere DB] Schema initialized successfully.');
   } catch (error: any) {
