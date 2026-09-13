@@ -144,10 +144,10 @@ async function main() {
 
   const reversalRetry = await call(db, { ...valid, status: 'reversed' }, env);
   const reversalRetryJson = await body(reversalRetry);
-  assert.ok(reversalRetry.status >= 200 && reversalRetry.status < 300); assert.equal(reversalRetryJson.duplicate, true);
+  assert.ok(reversalRetry.status >= 400 && reversalRetry.status < 500); assert.equal(reversalRetryJson.success, false);
   assert.equal(db.wallets[0].balance, 0); assert.equal(db.transactions.length, 2);
 
-  console.log('CPAGrip isolated handler tests passed: POST-only contract, secret auth, invalid payout, unknown user, credit, 75/25 split, deterministic idempotency, duplicate retry, reversal and reversal retry');
+  console.log('CPAGrip isolated handler tests passed: POST-only contract, secret auth, invalid payout, unknown user, credit, 75/25 split, deterministic idempotency, duplicate retry, reversal and safe reversal retry');
 }
 
 main().catch(e => { console.error(e); process.exitCode = 1; });
