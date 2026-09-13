@@ -41,21 +41,23 @@ jobs:
           echo "Deployed Worker: $WORKER_URL"
           echo "WORKER_URL=$WORKER_URL" >> "$GITHUB_ENV"
 
-      - name: Verify public Worker and Netlify CORS
+      - name: Verify public Worker and production frontend CORS
         run: |
           set -euo pipefail
-          echo "Checking $WORKER_URL/api/health"
-          curl --fail-with-body --silent --show-error --retry 3 --retry-delay 2 \
-            -H 'Origin: https://famous-alfajores-46f9fa.netlify.app' \
-            "$WORKER_URL/api/health"
-          echo
-          echo "Checking browser preflight"
-          curl --fail --silent --show-error --retry 3 --retry-delay 2 -D /tmp/preflight.headers -o /dev/null \
-            -X OPTIONS \
-            -H 'Origin: https://famous-alfajores-46f9fa.netlify.app' \
-            -H 'Access-Control-Request-Method: POST' \
-            -H 'Access-Control-Request-Headers: content-type,authorization' \
-            "$WORKER_URL/api/auth/login"
-          grep -qi '^access-control-allow-origin: https://famous-alfajores-46f9fa.netlify.app' /tmp/preflight.headers
-          grep -qi '^access-control-allow-credentials: true' /tmp/preflight.headers
-          echo "Public Worker + Netlify CORS verification passed."
+          for ORIGIN in "https://spheres.com.ng" "https://sphereis.netlify.app"; do
+            echo "Checking $WORKER_URL/api/health from $ORIGIN"
+            curl --fail-with-body --silent --show-error --retry 3 --retry-delay 2 \
+              -H "Origin: $ORIGIN" \
+              "$WORKER_URL/api/health"
+            echo
+            echo "Checking browser preflight for $ORIGIN"
+            curl --fail --silent --show-error --retry 3 --retry-delay 2 -D /tmp/preflight.headers -o /dev/null \
+              -X OPTIONS \
+              -H "Origin: $ORIGIN" \
+              -H 'Access-Control-Request-Method: POST' \
+              -H 'Access-Control-Request-Headers: content-type,authorization' \
+              "$WORKER_URL/api/auth/login"
+            grep -qi "^access-control-allow-origin: $ORIGIN" /tmp/preflight.headers
+            grep -qi '^access-control-allow-credentials: true' /tmp/preflight.headers
+          done
+          echo "Public Worker + production frontend CORS verification passed."
