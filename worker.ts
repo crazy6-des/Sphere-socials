@@ -5,6 +5,7 @@
 import { handleServerlessRequest } from './src/server/api';
 import { initializeDatabase } from './src/server/db/schema';
 import { authenticateSocialRequest, createSocialNotification, handleSocialExtensionRequest } from './src/server/social-extensions';
+import { handlePr2RewardsRequest } from './src/server/rewards/pr2Rewards';
 
 export interface Env {
   DB: any;
@@ -17,6 +18,12 @@ export interface Env {
   OFFERWALL_KEY?: string;
   ESRNB_APP_ID?: string;
   ESRNB_API_KEY?: string;
+  CPALEAD_PUBLISHER_ID?: string;
+  CPALEAD_POSTBACK_PASSWORD?: string;
+  CPAGRIP_PUBLISHER_ID?: string;
+  CPAGRIP_POSTBACK_SECRET?: string;
+  CPAGRIP_POSTBACK_MODE?: string;
+  MIN_WITHDRAWAL?: string;
   MUSIC_API_KEY?: string;
   MUSIC_API_URL?: string;
   BREVO_API_KEY?: string;
@@ -156,8 +163,6 @@ async function persistActionNotification(context: any, response: Response, reque
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    // Answer browser CORS preflight before auth/configuration checks. This prevents
-    // configuration errors from being masked as a generic fetch/network failure.
     if (request.method.toUpperCase() === 'OPTIONS') {
       return new Response(null, { status: 204, headers: workerCorsHeaders(request) });
     }
@@ -179,6 +184,19 @@ export default {
 
     const sessionGuardResponse = await guardSessionBoundary(routedRequest, env, secret);
     if (sessionGuardResponse) return sessionGuardResponse;
+
+    // PR2 boundary: Earn + Wallet + Withdrawal are routed through the isolated,
+    // hardened rewards engine. All other application routes continue through
+    // the existing server handler untouched.
+    if (env?.DB && typeof env.DB.prepare === 'function') {
+      await initializeDatabase(env.DB);
+      const rewardsResponse = await handlePr2RewardsRequest(routedRequest, env, {
+        prepare: (sql: string) => env.DB.prepare(sql),
+        exec: async (sql: string) => { await env.DB.exec(sql); },
+        batch: async (statements: any[]) => await env.DB.batch(statements),
+      });
+      if (rewardsResponse) return rewardsResponse;
+    }
 
     const url = new URL(routedRequest.url);
     let path = url.pathname;
