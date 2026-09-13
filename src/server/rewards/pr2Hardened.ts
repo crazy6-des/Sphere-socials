@@ -1,0 +1,246 @@
+import { DatabaseAdapter } from '../db/adapter';
+import { generateId, sha256Hash, verifyJwt } from '../auth/crypto';
+
+export type RewardProviderId = 'cpalead' | 'cpagrip' | 'reserved_3' | 'reserved_4' | 'reserved_5';
+
+type Conversion = {
+  provider: RewardProviderId;
+  externalUserId: string;
+  externalConversionId: string;
+  externalOfferId: string | null;
+  payout: number;
+  currency: string;
+  status: 'approved' | 'reversed';
+  occurredAt: number;
+  rawPayloadHash: string;
+};
+
+const PROVIDERS: RewardProviderId[] = ['cpalead', 'cpagrip', 'reserved_3', 'reserved_4', 'reserved_5'];
+const PAYOUT_METHODS = new Set(['paypal', 'crypto_usdt', 'bank']);
+
+const envValue = (env: any, key: string) => String(env?.[key] ?? '').trim();
+const clean = (value: unknown, max = 256) => String(value ?? '').trim().slice(0, max);
+const money = (value: unknown) => { const n = Number(value); return Number.isFinite(n) && n > 0 && n <= 1_000_000 ? Math.round(n * 100) / 100 : null; };
+
+function constantTimeEqual(a: string, b: string): boolean {
+  if (!a || !b || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+async function hmacSha256(secret: string, value: string): Promise<string> {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(signature)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function canonicalPayload(payload: Record<string, any>): string {
+  return Object.keys(payload)
+    .filter(k => !['signature', 'sig', 'password'].includes(k))
+    .sort()
+    .map(k => `${k}=${String(payload[k])}`)
+    .join('&');
+}
+
+function cors(request: Request): Record<string, string> {
+  const origin = request.headers.get('Origin') || '';
+  const allowed = !origin || origin === 'null' || /^https:\/\/([a-z0-9-]+\.)*netlify\.app$/i.test(origin) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+  return { 'Access-Control-Allow-Origin': allowed && origin && origin !== 'null' ? origin : '*', 'Access-Control-Allow-Credentials': 'true', Vary: 'Origin' };
+}
+
+function json(request: Request, body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...cors(request) } });
+}
+function fail(request: Request, error: string, status = 400): Response { return json(request, { success: false, error }, status); }
+
+export function rewardProviderStatuses(env: any) {
+  const cpalead = Boolean(envValue(env, 'CPALEAD_PUBLISHER_ID') && envValue(env, 'CPALEAD_POSTBACK_PASSWORD'));
+  const cpagrip = Boolean(envValue(env, 'CPAGRIP_PUBLISHER_ID') && envValue(env, 'CPAGRIP_POSTBACK_SECRET') && envValue(env, 'CPAGRIP_POSTBACK_MODE'));
+  return [
+    { id: 'cpalead', name: 'CPAlead', tagline: 'Surveys, installs and task-based offers', description: 'Server-to-server CPAlead reward integration.', isConfigured: cpalead, configurationNotes: cpalead ? 'Publisher ID and postback password configured.' : 'Configure CPALEAD_PUBLISHER_ID and CPALEAD_POSTBACK_PASSWORD before activation.', supportedOfferTypes: ['Surveys', 'App Installs', 'Games', 'Lead Offers'] },
+    { id: 'cpagrip', name: 'CPAGrip', tagline: 'Offer walls and virtual-currency campaigns', description: 'CPAGrip integration with an explicit dashboard-confirmed verification mode.', isConfigured: cpagrip, configurationNotes: cpagrip ? 'Publisher ID, secret and verification mode configured.' : 'Configure CPAGRIP_PUBLISHER_ID, CPAGRIP_POSTBACK_SECRET and CPAGRIP_POSTBACK_MODE only after confirming the dashboard callback contract.', supportedOfferTypes: ['Offer Walls', 'Surveys', 'Leads', 'Virtual Currency'] },
+    ...(['reserved_3', 'reserved_4', 'reserved_5'] as RewardProviderId[]).map((id, i) => ({ id, name: `Provider ${i + 3}`, tagline: 'Reserved', description: 'Reserved provider slot.', isConfigured: false, configurationNotes: 'Add one adapter without changing the rewards engine.', supportedOfferTypes: [] })),
+  ];
+}
+
+async function normalizeProvider(provider: RewardProviderId, payload: Record<string, any>, env: any): Promise<Conversion | null> {
+  const externalUserId = clean(payload.subid || payload.sub_id || payload.player_id || payload.user_id || payload.uid, 160);
+  const externalConversionId = clean(payload.lead_id || payload.transaction_id || payload.tx_id || payload.conversion_id || payload.event_id || payload.id, 160);
+  const externalOfferId = clean(payload.campaign_id || payload.offer_id || payload.offerid || payload.offer, 160) || null;
+  const payout = money(payload.payout ?? payload.amount ?? payload.reward);
+  if (!externalUserId || !externalConversionId || payout === null) return null;
+
+  if (provider === 'cpalead') {
+    const secret = envValue(env, 'CPALEAD_POSTBACK_PASSWORD');
+    const supplied = clean(payload.password, 256);
+    if (!secret || !supplied || !constantTimeEqual(supplied, secret)) return null;
+  } else if (provider === 'cpagrip') {
+    const secret = envValue(env, 'CPAGRIP_POSTBACK_SECRET');
+    const mode = envValue(env, 'CPAGRIP_POSTBACK_MODE').toLowerCase();
+    const supplied = clean(payload.signature || payload.sig || payload.password, 256);
+    if (!secret || !supplied) return null;
+    if (mode === 'secret') {
+      if (!constantTimeEqual(supplied, secret)) return null;
+    } else if (mode === 'hmac-sha256-query') {
+      const expected = await hmacSha256(secret, canonicalPayload(payload));
+      if (!constantTimeEqual(supplied.toLowerCase(), expected.toLowerCase())) return null;
+    } else return null;
+  } else return null;
+
+  const state = clean(payload.status || payload.event).toLowerCase();
+  const reversed = ['reversed', 'reverse', 'chargeback', 'cancelled', 'canceled'].includes(state) || clean(payload.reversal).toLowerCase() === 'true';
+  return { provider, externalUserId, externalConversionId, externalOfferId, payout, currency: clean(payload.currency || payload.payout_currency || 'USD', 16).toUpperCase(), status: reversed ? 'reversed' : 'approved', occurredAt: Date.now(), rawPayloadHash: await sha256Hash(JSON.stringify(payload)) };
+}
+
+async function authenticateUser(request: Request, db: DatabaseAdapter, env: any): Promise<string | null> {
+  const header = request.headers.get('Authorization') || '';
+  if (!header.startsWith('Bearer ')) return null;
+  const token = header.slice(7).trim();
+  const secret = envValue(env, 'JWT_SECRET');
+  if (!token || !secret) return null;
+  try {
+    const payload = await verifyJwt<{ userId: string }>(token, secret);
+    if (!payload?.userId) return null;
+    const hash = await sha256Hash(token);
+    const session: any = await db.prepare('SELECT user_id, revoked, expires_at FROM sessions WHERE token_hash = ?').bind(hash).first();
+    if (!session || Number(session.revoked) === 1 || Number(session.expires_at) <= Date.now()) return null;
+    return session.user_id === payload.userId ? session.user_id : null;
+  } catch { return null; }
+}
+
+async function rewardCredit(db: DatabaseAdapter, conversion: Conversion): Promise<{ state: 'credited' | 'duplicate' | 'reversed' | 'rejected'; balance?: number }> {
+  const user: any = await db.prepare('SELECT id FROM users WHERE id = ?').bind(conversion.externalUserId).first();
+  if (!user) return { state: 'rejected' };
+  const wallet: any = await db.prepare('SELECT id FROM wallets WHERE user_id = ?').bind(user.id).first();
+  if (!wallet) return { state: 'rejected' };
+  const event: any = await db.prepare('SELECT id, status, payout FROM reward_events WHERE provider = ? AND external_conversion_id = ?').bind(conversion.provider, conversion.externalConversionId).first();
+
+  if (conversion.status === 'approved') {
+    if (event?.status === 'credited' || event?.status === 'reversed') return { state: 'duplicate' };
+    if (!db.batch) return { state: 'rejected' };
+
+    if (!event) {
+      const reserve = await db.prepare('INSERT OR IGNORE INTO reward_events (id, provider, external_conversion_id, external_user_id, external_offer_id, payout, currency, status, raw_payload_hash, occurred_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(`rev_${generateId(14)}`, conversion.provider, conversion.externalConversionId, user.id, conversion.externalOfferId, conversion.payout, conversion.currency, 'pending', conversion.rawPayloadHash, conversion.occurredAt, Date.now()).run();
+      if (!reserve.success) return { state: 'rejected' };
+    } else if (event.status !== 'pending') return { state: 'duplicate' };
+
+    const txId = `txn_${generateId(14)}`;
+    const reference = `reward:${conversion.provider}:${conversion.externalConversionId}`;
+    await db.batch([
+      db.prepare('INSERT INTO transactions (id, wallet_id, user_id, type, amount, status, provider, description, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(txId, wallet.id, user.id, 'reward', conversion.payout, 'completed', conversion.provider, `${conversion.provider} reward`, reference, Date.now()),
+      db.prepare('UPDATE wallets SET balance = balance + ?, total_earned = total_earned + ?, updated_at = ? WHERE user_id = ?').bind(conversion.payout, conversion.payout, Date.now(), user.id),
+      db.prepare("UPDATE reward_events SET status = 'credited', transaction_id = ?, processed_at = ? WHERE provider = ? AND external_conversion_id = ? AND status = 'pending'").bind(txId, Date.now(), conversion.provider, conversion.externalConversionId),
+    ]);
+    const updated: any = await db.prepare('SELECT balance FROM wallets WHERE user_id = ?').bind(user.id).first();
+    return { state: 'credited', balance: Number(updated?.balance || 0) };
+  }
+
+  if (!event || event.status !== 'credited') return { state: 'rejected' };
+  const reversalReference = `reward-reversal:${conversion.provider}:${conversion.externalConversionId}`;
+  const existingReversal: any = await db.prepare('SELECT id FROM transactions WHERE reference_id = ?').bind(reversalReference).first();
+  if (existingReversal) return { state: 'duplicate' };
+  const amount = Number(event.payout || conversion.payout);
+  if (!db.batch || !Number.isFinite(amount) || amount <= 0) return { state: 'rejected' };
+  await db.batch([
+    db.prepare('INSERT INTO transactions (id, wallet_id, user_id, type, amount, status, provider, description, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(`txn_${generateId(14)}`, wallet.id, user.id, 'reward', -amount, 'cancelled', conversion.provider, `${conversion.provider} reward reversal`, reversalReference, Date.now()),
+    db.prepare('UPDATE wallets SET balance = balance - ?, updated_at = ? WHERE user_id = ?').bind(amount, Date.now(), user.id),
+    db.prepare("UPDATE reward_events SET status = 'reversed', processed_at = ? WHERE provider = ? AND external_conversion_id = ? AND status = 'credited'").bind(Date.now(), conversion.provider, conversion.externalConversionId),
+  ]);
+  const updated: any = await db.prepare('SELECT balance FROM wallets WHERE user_id = ?').bind(user.id).first();
+  return { state: 'reversed', balance: Number(updated?.balance || 0) };
+}
+
+async function walletResponse(request: Request, db: DatabaseAdapter, userId: string): Promise<Response> {
+  const wallet: any = await db.prepare('SELECT user_id, balance, total_earned, total_withdrawn, updated_at FROM wallets WHERE user_id = ?').bind(userId).first();
+  const transactions: any = await db.prepare('SELECT id, wallet_id, user_id, type, amount, status, provider, description, reference_id, created_at FROM transactions WHERE user_id = ? ORDER BY created_at DESC LIMIT 100').bind(userId).all();
+  const w = wallet || { user_id: userId, balance: 0, total_earned: 0, total_withdrawn: 0, updated_at: Date.now() };
+  return json(request, { success: true, data: { wallet: { userId: w.user_id, balance: Number(w.balance || 0), totalEarned: Number(w.total_earned || 0), totalWithdrawn: Number(w.total_withdrawn || 0), updatedAt: Number(w.updated_at || Date.now()) }, transactions: transactions.results || [] } });
+}
+
+async function withdrawal(db: DatabaseAdapter, userId: string, amount: number, method: string, destination: string): Promise<{ ok: boolean; id?: string; balance?: number }> {
+  if (!db.batch) return { ok: false };
+  const id = `wd_${generateId(14)}`;
+  const now = Date.now();
+  const batch = await db.batch([
+    db.prepare("INSERT INTO withdrawals (id, user_id, amount, payout_method, destination_account, status, created_at, reference_id) SELECT ?, ?, ?, ?, ?, 'pending', ?, ? WHERE NOT EXISTS (SELECT 1 FROM withdrawals WHERE user_id = ? AND status = 'pending') AND EXISTS (SELECT 1 FROM wallets WHERE user_id = ? AND balance >= ?)").bind(id, userId, amount, method, destination, now, `withdrawal:${id}`, userId, userId, amount),
+    db.prepare("INSERT INTO transactions (id, wallet_id, user_id, type, amount, status, provider, description, reference_id, created_at) SELECT ?, w.id, ?, 'withdrawal', ?, 'pending', ?, 'Withdrawal request', ?, ? FROM wallets w WHERE w.user_id = ? AND EXISTS (SELECT 1 FROM withdrawals WHERE id = ? AND status = 'pending')").bind(`txn_${generateId(14)}`, userId, -amount, method, `withdrawal:${id}`, now, userId, id),
+    db.prepare("UPDATE wallets SET balance = balance - ?, total_withdrawn = total_withdrawn + ?, updated_at = ? WHERE user_id = ? AND balance >= ? AND EXISTS (SELECT 1 FROM withdrawals WHERE id = ? AND status = 'pending')").bind(amount, amount, now, userId, amount, id),
+  ]);
+  if (!batch?.[0]?.meta?.changes) return { ok: false };
+  const wallet: any = await db.prepare('SELECT balance FROM wallets WHERE user_id = ?').bind(userId).first();
+  return { ok: true, id, balance: Number(wallet?.balance || 0) };
+}
+
+export async function handlePr2HardenedRequest(request: Request, env: any, db: DatabaseAdapter): Promise<Response | null> {
+  const url = new URL(request.url);
+  let path = url.pathname;
+  if (path.startsWith('/.netlify/functions/api')) path = path.replace('/.netlify/functions/api', '/api');
+  const method = request.method.toUpperCase();
+  if (!path.startsWith('/api/earn') && path !== '/api/wallet' && path !== '/api/withdrawals') return null;
+  if (method === 'OPTIONS') return json(request, { success: true }, 204);
+
+  if (path === '/api/earn/providers' && method === 'GET') return json(request, { success: true, data: { providers: rewardProviderStatuses(env) } });
+
+  if (path.startsWith('/api/earn/postback/') && (method === 'GET' || method === 'POST')) {
+    const provider = clean(path.split('/').pop()).toLowerCase() as RewardProviderId;
+    if (!PROVIDERS.includes(provider) || provider.startsWith('reserved_')) return fail(request, 'Unknown reward provider.', 404);
+    const payload = method === 'GET' ? Object.fromEntries(url.searchParams.entries()) : await request.json().catch(() => ({}));
+    const conversion = await normalizeProvider(provider, payload as Record<string, any>, env);
+    if (!conversion) return fail(request, 'Invalid or unauthenticated reward callback.', 401);
+    const result = await rewardCredit(db, conversion);
+    if (result.state === 'duplicate') return json(request, { success: true, duplicate: true });
+    if (result.state === 'credited') return json(request, { success: true, credited: true, balance: result.balance });
+    if (result.state === 'reversed') return json(request, { success: true, reversed: true, balance: result.balance });
+    return fail(request, 'Reward callback could not be processed.', 409);
+  }
+
+  const userId = await authenticateUser(request, db, env);
+  if (!userId) return fail(request, 'Authentication required.', 401);
+
+  if (path === '/api/wallet' && method === 'GET') return walletResponse(request, db, userId);
+
+  if (path === '/api/withdrawals' && method === 'POST') {
+    const body: any = await request.json().catch(() => ({}));
+    const amount = money(body.amount);
+    const payoutMethod = clean(body.payoutMethod || body.payout_method).toLowerCase();
+    const destination = clean(body.destinationAccount || body.destination_account, 256);
+    const minimum = money(envValue(env, 'MIN_WITHDRAWAL') || '5') || 5;
+    if (amount === null || amount < minimum) return fail(request, `Minimum withdrawal is ${minimum}.`);
+    if (!PAYOUT_METHODS.has(payoutMethod) || !destination) return fail(request, 'Valid payout method and destination account are required.');
+    const result = await withdrawal(db, userId, amount, payoutMethod, destination);
+    if (!result.ok) return fail(request, 'Insufficient balance or an existing pending withdrawal.', 409);
+    return json(request, { success: true, data: { withdrawalId: result.id, newBalance: result.balance } });
+  }
+
+  if (path === '/api/earn/attention-reward' && method === 'POST') {
+    const wallet: any = await db.prepare('SELECT id FROM wallets WHERE user_id = ?').bind(userId).first();
+    if (!wallet) return fail(request, 'Wallet unavailable.', 500);
+    const day = new Date(); day.setHours(0, 0, 0, 0);
+    const reference = `attention:${userId}:${day.getTime()}`;
+    const result = await db.prepare('INSERT OR IGNORE INTO transactions (id, wallet_id, user_id, type, amount, status, provider, description, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(`txn_${generateId(14)}`, wallet.id, userId, 'reward', 0.15, 'completed', 'attention', 'Verified attention session', reference, Date.now()).run();
+    if (!result.success || result.meta.changes !== 1) return fail(request, 'Daily attention reward already credited.', 409);
+    await db.prepare('UPDATE wallets SET balance = balance + 0.15, total_earned = total_earned + 0.15, updated_at = ? WHERE user_id = ?').bind(Date.now(), userId).run();
+    const updated: any = await db.prepare('SELECT balance FROM wallets WHERE user_id = ?').bind(userId).first();
+    return json(request, { success: true, data: { rewardAmount: 0.15, newBalance: Number(updated?.balance || 0), message: 'Attention session verified and credited.' } });
+  }
+
+  if (path === '/api/earn/simulate-reward' && method === 'POST') {
+    if (envValue(env, 'NODE_ENV') === 'production' || envValue(env, 'PRODUCTION') === 'true') return fail(request, 'Reward simulation is disabled in production.', 403);
+    const body: any = await request.json().catch(() => ({}));
+    const provider = clean(body.providerId || body.provider_id).toLowerCase();
+    const amount = money(body.amount);
+    if (!['cpalead', 'cpagrip'].includes(provider) || amount === null) return fail(request, 'Invalid provider or reward amount.');
+    const wallet: any = await db.prepare('SELECT id FROM wallets WHERE user_id = ?').bind(userId).first();
+    if (!wallet) return fail(request, 'Wallet unavailable.', 500);
+    const now = Date.now();
+    await db.batch?.([
+      db.prepare('INSERT INTO transactions (id, wallet_id, user_id, type, amount, status, provider, description, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(`txn_${generateId(14)}`, wallet.id, userId, 'reward', amount, 'completed', provider, 'Development reward simulation', `simulation:${provider}:${generateId(16)}`, now),
+      db.prepare('UPDATE wallets SET balance = balance + ?, total_earned = total_earned + ?, updated_at = ? WHERE user_id = ?').bind(amount, amount, now, userId),
+    ]);
+    const updated: any = await db.prepare('SELECT balance FROM wallets WHERE user_id = ?').bind(userId).first();
+    return json(request, { success: true, data: { rewardAmount: amount, newBalance: Number(updated?.balance || 0), message: 'Development reward simulated.' } });
+  }
+
+  return null;
+}
