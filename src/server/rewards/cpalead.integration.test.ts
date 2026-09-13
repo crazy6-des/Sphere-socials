@@ -19,17 +19,19 @@ class FakeDb {
  }
  async batch(s:FakeStatement[]){const out=[];for(const x of s)out.push(await x.run());return out}
 }
-async function call(db:FakeDb,payload:Record<string,string>,env:Record<string,string>){const query=new URLSearchParams(payload);return handlePr2HardenedRequest(new Request(`https://isolated.test/api/earn/postback/cpalead?${query}`,{method:'GET'}),env,db as any)}
+async function call(db:FakeDb,payload:Record<string,string>,env:Record<string,string>){const requestBody=new URLSearchParams(payload).toString();return handlePr2HardenedRequest(new Request('https://isolated.test/api/earn/postback/cpalead',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:requestBody}),env,db as any)}
+async function getCall(db:FakeDb,payload:Record<string,string>,env:Record<string,string>){const query=new URLSearchParams(payload);return handlePr2HardenedRequest(new Request(`https://isolated.test/api/earn/postback/cpalead?${query}`,{method:'GET'}),env,db as any)}
 async function body(response:Response){return await response.json() as any}
 async function main(){
  const env={CPALEAD_POSTBACK_PASSWORD:'test-secret',REWARD_USER_SHARE_PERCENT:'75'};const db=new FakeDb();const valid={subid:'CPA_TEST_USER_001',lead_id:'TEST_LEAD_001',campaign_id:'CAMP_001',campaign_name:'Test Campaign',payout:'1.00',password:'test-secret'};
+ const getRejected=await getCall(db,valid,env);assert.equal(getRejected.status,405);assert.equal(db.wallets[0].balance,0);
  const badPassword=await call(db,{...valid,password:'wrong'},env);assert.ok(badPassword.status>=400&&badPassword.status<500);assert.equal(db.wallets[0].balance,0);
  const missingId=await call(db,{...valid,lead_id:''},env);assert.ok(missingId.status>=400&&missingId.status<500);assert.equal(db.wallets[0].balance,0);
  const unknownUser=await call(db,{...valid,subid:'UNKNOWN_USER'},env);assert.ok(unknownUser.status>=400&&unknownUser.status<500);assert.equal(db.wallets[0].balance,0);
  const credited=await call(db,valid,env);const creditedJson=await body(credited);assert.ok(credited.status>=200&&credited.status<300);assert.equal(creditedJson.success,true);assert.equal(db.wallets[0].balance,0.75);assert.equal(db.wallets[0].total_earned,0.75);assert.equal(db.events[0].status,'credited');assert.equal(db.transactions.length,1);
- const duplicate=await call(db,valid,env);assert.ok(duplicate.status>=200&&duplicate.status<300);assert.equal(db.wallets[0].balance,0.75);assert.equal(db.transactions.length,1);
+ const duplicate=await call(db,valid,env);const duplicateJson=await body(duplicate);assert.ok(duplicate.status>=200&&duplicate.status<300);assert.equal(duplicateJson.duplicate,true);assert.equal(db.wallets[0].balance,0.75);assert.equal(db.transactions.length,1);
  const reversal=await call(db,{...valid,status:'reversed'},env);const reversalJson=await body(reversal);assert.ok(reversal.status>=200&&reversal.status<300);assert.equal(reversalJson.success,true);assert.equal(db.wallets[0].balance,0);assert.equal(db.events[0].status,'reversed');assert.equal(db.transactions.length,2);
  const reversalDuplicate=await call(db,{...valid,status:'reversed'},env);assert.ok(reversalDuplicate.status>=400&&reversalDuplicate.status<500);assert.equal(db.wallets[0].balance,0);assert.equal(db.transactions.length,2);
- console.log('CPAlead isolated handler tests passed: bad secret, missing ID, unknown user, credit, 75/25 split, duplicate retry, reversal, safe reversal retry');
+ console.log('CPAlead isolated handler tests passed: POST contract, GET rejection, bad secret, missing ID, unknown user, credit, 75/25 split, duplicate retry, reversal, safe reversal retry');
 }
 main().catch(e=>{console.error(e);process.exitCode=1});
