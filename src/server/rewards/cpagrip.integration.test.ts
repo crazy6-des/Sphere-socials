@@ -35,6 +35,15 @@ class FakeDb {
       return { success: true, meta: { changes: 1 } };
     }
 
+    if (sql.includes("type, amount, status, provider, description") && sql.includes("'cancelled'")) {
+      const ref = p[6];
+      if (this.transactions.some(x => x.reference_id === ref)) return { success: true, meta: { changes: 0 } };
+      const event = this.events.find(x => x.provider === p[8] && x.external_conversion_id === p[9] && x.status === 'credited');
+      if (!event) return { success: true, meta: { changes: 0 } };
+      this.transactions.push({ id: p[0], wallet_id: p[1], user_id: p[2], amount: p[3], provider: p[4], description: p[5], reference_id: ref, status: 'cancelled' });
+      return { success: true, meta: { changes: 1 } };
+    }
+
     if (sql.startsWith('INSERT INTO transactions')) {
       const ref = p[6];
       if (this.transactions.some(x => x.reference_id === ref)) return { success: true, meta: { changes: 0 } };
@@ -53,11 +62,29 @@ class FakeDb {
       return { success: true, meta: { changes: 1 } };
     }
 
+    if (sql.startsWith('UPDATE wallets SET balance = balance -')) {
+      const w = this.wallets.find(x => x.user_id === p[2]);
+      if (!w) return { success: true, meta: { changes: 0 } };
+      if (w.balance < p[3]) return { success: true, meta: { changes: 0 } };
+      if (!this.transactions.some(x => x.reference_id === p[4] && x.status === 'cancelled')) return { success: true, meta: { changes: 0 } };
+      if (!this.events.some(x => x.provider === p[5] && x.external_conversion_id === p[6] && x.status === 'credited')) return { success: true, meta: { changes: 0 } };
+      w.balance -= p[0];
+      return { success: true, meta: { changes: 1 } };
+    }
+
     if (sql.startsWith("UPDATE reward_events SET status = 'credited'")) {
       const e = this.events.find(x => x.provider === p[2] && x.external_conversion_id === p[3] && x.status === 'pending');
       const tx = this.transactions.find(x => x.reference_id === p[0] && x.status === 'completed');
       if (!e || !tx) return { success: true, meta: { changes: 0 } };
       e.status = 'credited'; e.transaction_id = tx.id;
+      return { success: true, meta: { changes: 1 } };
+    }
+
+    if (sql.startsWith("UPDATE reward_events SET status = 'reversed'")) {
+      const e = this.events.find(x => x.provider === p[1] && x.external_conversion_id === p[2] && x.status === 'credited');
+      const tx = this.transactions.find(x => x.reference_id === p[3] && x.status === 'cancelled');
+      if (!e || !tx) return { success: true, meta: { changes: 0 } };
+      e.status = 'reversed';
       return { success: true, meta: { changes: 1 } };
     }
 
@@ -76,7 +103,7 @@ async function body(response: Response) { return await response.json() as any; }
 async function main() {
   const env = { CPAGRIP_PUBLISHER_ID: 'CPAGRIP_TEST_PUBLISHER', CPAGRIP_POSTBACK_SECRET: 'test-cpagrip-secret', CPAGRIP_POSTBACK_MODE: 'secret', REWARD_USER_SHARE_PERCENT: '75' };
   const db = new FakeDb();
-  const valid = { password: 'test-cpagrip-secret', payout: '2.00', offer_id: 'OFFER_1912924', tracking_id: 'CPAGRIP_TEST_USER_001' };
+  const valid = { password: 'test-cpagrip-secret', payout: '2.00', offer_id: 'OFFER_1912924', tracking_id: 'CPAGRIP_TEST_USER_001', conversion_id: 'CPAGRIP_CONV_001' };
 
   const getAttempt = await handlePr2HardenedRequest(new Request('https://isolated.test/api/earn/postback/cpagrip?password=test-cpagrip-secret&payout=2&offer_id=OFFER&tracking_id=CPAGRIP_TEST_USER_001', { method: 'GET' }), env, db as any);
   assert.equal(getAttempt?.status, 405);
@@ -107,7 +134,20 @@ async function main() {
   assert.ok(duplicate.status >= 200 && duplicate.status < 300); assert.equal(duplicateJson.duplicate, true);
   assert.equal(db.wallets[0].balance, 1.5); assert.equal(db.transactions.length, 1);
 
-  console.log('CPAGrip isolated handler tests passed: POST-only contract, secret auth, invalid payout, unknown user, credit, 75/25 split, deterministic idempotency and duplicate retry');
+  const reversal = await call(db, { ...valid, status: 'reversed' }, env);
+  const reversalJson = await body(reversal);
+  assert.ok(reversal.status >= 200 && reversal.status < 300);
+  assert.equal(reversalJson.success, true); assert.equal(reversalJson.reversed, true);
+  assert.equal(reversalJson.grossPayout, 2); assert.equal(reversalJson.userReward, 1.5); assert.equal(reversalJson.platformShare, 0.5);
+  assert.equal(db.wallets[0].balance, 0); assert.equal(db.events[0].status, 'reversed'); assert.equal(db.transactions.length, 2);
+  assert.equal(db.transactions[1].amount, -1.5); assert.equal(db.transactions[1].status, 'cancelled');
+
+  const reversalRetry = await call(db, { ...valid, status: 'reversed' }, env);
+  const reversalRetryJson = await body(reversalRetry);
+  assert.ok(reversalRetry.status >= 200 && reversalRetry.status < 300); assert.equal(reversalRetryJson.duplicate, true);
+  assert.equal(db.wallets[0].balance, 0); assert.equal(db.transactions.length, 2);
+
+  console.log('CPAGrip isolated handler tests passed: POST-only contract, secret auth, invalid payout, unknown user, credit, 75/25 split, deterministic idempotency, duplicate retry, reversal and reversal retry');
 }
 
 main().catch(e => { console.error(e); process.exitCode = 1; });
